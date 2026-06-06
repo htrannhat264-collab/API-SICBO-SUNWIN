@@ -7,66 +7,30 @@ app.use(cors());
 app.use(express.json());
 const PORT = process.env.PORT || 5000;
 
-// ==========================================
 // API SUNWIN SICBO
-// ==========================================
 const SICBO_API = 'https://api.wsktnus8.net/v2/history/getLastResult?gameId=ktrng_3979&size=100&tableId=39791215743193&curPage=1';
 
-// ==========================================
-// LƯU TRỮ DỮ LIỆU
-// ==========================================
-let gameData = {
-  data: [],
-  tongData: [],
-  lichSuDuDoan: [],
-  feedbackHistory: []
-};
-
+// LƯU TRỮ
+let gameData = { data: [], tongData: [], lichSuDuDoan: [] };
 let stats = { tong: 0, dung: 0, sai: 0, tiLe: '0%' };
-let memory = { 
-  markovChain: {}, 
-  markovChainBac3: {},
-  patternHistory: [],
-  diemTrungBinh: 10.5
-};
+let memory = {};
 
-// ==========================================
 // FETCH DATA
-// ==========================================
 async function fetchData() {
   try {
-    const headers = { 
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': 'application/json'
-    };
-    const res = await axios.get(SICBO_API, { timeout: 15000, headers });
+    const res = await axios.get(SICBO_API, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
     const data = res.data;
+    if (!data?.data?.resultList) return null;
     
-    if (data?.data?.resultList && Array.isArray(data.data.resultList)) {
-      const resultList = data.data.resultList;
-      const formattedData = [];
-      
-      for (const item of resultList) {
-        const tong = item.score;
-        if (!tong || item.resultType === 11) continue;
-        
-        let ketQua = '';
-        if (item.resultType === 3) ketQua = 'Tài';
-        else if (item.resultType === 4) ketQua = 'Xỉu';
-        
-        formattedData.push({
-          phien: parseInt(item.gameNum.replace('#', '')) || item.timeMilli,
-          ket_qua: ketQua,
-          tong: tong,
-          v1: item.facesList?.[0] || '?',
-          v2: item.facesList?.[1] || '?',
-          v3: item.facesList?.[2] || '?',
-          timeMilli: item.timeMilli
-        });
-      }
-      return formattedData;
-    }
-    return null;
+    return data.data.resultList.filter(item => item.score && item.resultType !== 11).map(item => ({
+      phien: parseInt(item.gameNum.replace('#', '')) || item.timeMilli,
+      ket_qua: item.resultType === 3 ? 'Tài' : 'Xỉu',
+      tong: item.score,
+      v1: item.facesList?.[0] || '?',
+      v2: item.facesList?.[1] || '?',
+      v3: item.facesList?.[2] || '?',
+      timeMilli: item.timeMilli
+    }));
   } catch (error) {
     console.error('Fetch lỗi:', error.message);
     return null;
@@ -74,644 +38,327 @@ async function fetchData() {
 }
 
 // ==========================================
-// ========== THUẬT TOÁN CỰC MẠNH ==========
+// THUẬT TOÁN CỐT LÕI - CỰC MẠNH
 // ==========================================
 
-// 1. PHÂN TÍCH PHÂN PHỐI ĐIỂM CHUẨN (Z-Score)
-function phanTichZScore(tongData) {
-  if (!tongData || tongData.length < 30) return null;
+// 1. PHÁT HIỆN QUY LUẬT CHUỖI (BỆT & CẦU)
+function timQuyLuat(lichSu) {
+  if (lichSu.length < 3) return null;
   
-  const diemCount = {};
-  for (let i = 0; i < tongData.length; i++) {
-    diemCount[tongData[i]] = (diemCount[tongData[i]] || 0) + 1;
-  }
-  
-  const n = tongData.length;
-  const kyVong = n / 14;
-  const ketQua = [];
-  
-  for (let diem = 4; diem <= 17; diem++) {
-    const count = diemCount[diem] || 0;
-    const zScore = (count - kyVong) / Math.sqrt(kyVong);
-    ketQua.push({ diem, count, zScore, tyLe: (count / n) * 100 });
-  }
-  
-  // Sắp xếp điểm có Z-Score thấp nhất (thiếu nhất)
-  ketQua.sort((a, b) => a.zScore - b.zScore);
-  const diemThieuNhat = ketQua.slice(0, 6);
-  const diemDuNhat = ketQua.slice(-6).reverse();
-  
-  return { diemThieuNhat, diemDuNhat, tongPhien: n };
-}
-
-// 2. PHÂN TÍCH KHOẢNG CÁCH + TRUNG BÌNH TRƯỢT
-function phanTichKhoangCachVaTrungBinh(tongData) {
-  if (!tongData || tongData.length < 20) return null;
-  
-  const lastAppear = {};
-  const khoangCachTrungBinh = {};
-  const lanXuatHien = {};
-  
-  for (let i = 0; i < tongData.length; i++) {
-    const diem = tongData[i];
-    if (!lanXuatHien[diem]) lanXuatHien[diem] = [];
-    lanXuatHien[diem].push(i);
-    
-    if (!lastAppear[diem]) {
-      lastAppear[diem] = i;
-    } else {
-      const gap = lastAppear[diem] - i;
-      if (!khoangCachTrungBinh[diem]) khoangCachTrungBinh[diem] = [];
-      khoangCachTrungBinh[diem].push(gap);
-      lastAppear[diem] = i;
-    }
-  }
-  
-  // Tính khoảng cách trung bình cho từng điểm
-  const avgGaps = {};
-  for (const [diem, gaps] of Object.entries(khoangCachTrungBinh)) {
-    if (gaps.length > 0) {
-      avgGaps[diem] = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-    }
-  }
-  
-  // Tính khoảng cách từ hiện tại
-  const currentPos = 0;
-  const diemVaKhoangCach = [];
-  for (let diem = 4; diem <= 17; diem++) {
-    const lastPos = lastAppear[diem] !== undefined ? lastAppear[diem] : tongData.length;
-    const distance = lastPos - currentPos;
-    const avgGap = avgGaps[diem] || tongData.length / 2;
-    const tyLeVuotAvg = distance / avgGap;
-    
-    diemVaKhoangCach.push({
-      diem,
-      distance,
-      avgGap,
-      tyLeVuotAvg,
-      daXuatHien: lastAppear[diem] !== undefined
-    });
-  }
-  
-  diemVaKhoangCach.sort((a, b) => b.tyLeVuotAvg - a.tyLeVuotAvg);
-  const diemLaUChuaVe = diemVaKhoangCach.slice(0, 8);
-  const diemChuaXuatHien = diemVaKhoangCach.filter(d => !d.daXuatHien).map(d => d.diem);
-  
-  // Trung bình trượt 10 phiên
-  const ma10 = [];
-  for (let i = 0; i <= tongData.length - 10; i++) {
-    const avg = tongData.slice(i, i + 10).reduce((a, b) => a + b, 0) / 10;
-    ma10.push(avg);
-  }
-  
-  const xuHuongMA = ma10.length >= 2 ? ma10[0] - ma10[1] : 0;
-  
-  return { diemLaUChuaVe, diemChuaXuatHien, diemVaKhoangCach, xuHuongMA, ma10GanNhat: ma10[0] };
-}
-
-// 3. MARKOV CHAIN BẬC 2 VÀ BẬC 3
-function phanTichMarkovNangCao(tongData) {
-  if (!tongData || tongData.length < 15) return null;
-  
-  const mc2 = memory.markovChain;
-  const mc3 = memory.markovChainBac3;
-  
-  // Markov bậc 2 (2 điểm gần nhất)
-  for (let i = tongData.length - 3; i >= 0; i--) {
-    const diem1 = tongData[i+2];
-    const diem2 = tongData[i+1];
-    const diemTiep = tongData[i];
-    const key = `${diem1}-${diem2}`;
-    if (!mc2[key]) mc2[key] = {};
-    mc2[key][diemTiep] = (mc2[key][diemTiep] || 0) + 1;
-  }
-  
-  // Markov bậc 3 (3 điểm gần nhất)
-  for (let i = tongData.length - 4; i >= 0; i--) {
-    const diem1 = tongData[i+3];
-    const diem2 = tongData[i+2];
-    const diem3 = tongData[i+1];
-    const diemTiep = tongData[i];
-    const key = `${diem1}-${diem2}-${diem3}`;
-    if (!mc3[key]) mc3[key] = {};
-    mc3[key][diemTiep] = (mc3[key][diemTiep] || 0) + 1;
-  }
-  
-  let duDoanBac2 = null;
-  let duDoanBac3 = null;
-  
-  if (tongData.length >= 2) {
-    const key2 = `${tongData[1]}-${tongData[0]}`;
-    const tk2 = mc2[key2];
-    if (tk2) {
-      const entries = Object.entries(tk2);
-      const tong = entries.reduce((s, [, c]) => s + c, 0);
-      duDoanBac2 = entries.map(([diem, count]) => ({
-        diem: parseInt(diem),
-        tyLe: (count / tong) * 100
-      })).sort((a, b) => b.tyLe - a.tyLe).slice(0, 3);
-    }
-  }
-  
-  if (tongData.length >= 3) {
-    const key3 = `${tongData[2]}-${tongData[1]}-${tongData[0]}`;
-    const tk3 = mc3[key3];
-    if (tk3) {
-      const entries = Object.entries(tk3);
-      const tong = entries.reduce((s, [, c]) => s + c, 0);
-      duDoanBac3 = entries.map(([diem, count]) => ({
-        diem: parseInt(diem),
-        tyLe: (count / tong) * 100
-      })).sort((a, b) => b.tyLe - a.tyLe).slice(0, 3);
-    }
-  }
-  
-  return { duDoanBac2, duDoanBac3 };
-}
-
-// 4. PHÂN TÍCH XU HƯỚNG (RSI, MACD đơn giản hóa)
-function phanTichXuHuongNangCao(tongData) {
-  if (!tongData || tongData.length < 20) return null;
-  
-  const last20 = tongData.slice(0, 20);
-  const last10 = last20.slice(0, 10);
-  const prev10 = last20.slice(10, 20);
-  
-  const avgLast10 = last10.reduce((a, b) => a + b, 0) / 10;
-  const avgPrev10 = prev10.reduce((a, b) => a + b, 0) / 10;
-  const xuHuong = avgLast10 - avgPrev10;
-  
-  // Tính độ lệch chuẩn
-  const mean = avgLast10;
-  const variance = last10.reduce((sum, x) => sum + Math.pow(x - mean, 2), 0) / 10;
-  const stdDev = Math.sqrt(variance);
-  
-  // Xác định vùng điểm dựa trên xu hướng
-  let vungDiemUuTien = [];
-  if (xuHuong > 1.5) {
-    vungDiemUuTien = [10, 11, 12, 13];
-  } else if (xuHuong < -1.5) {
-    vungDiemUuTien = [7, 8, 9, 10];
-  } else {
-    vungDiemUuTien = [9, 10, 11, 12];
-  }
-  
-  // Dự đoán khoảng điểm dựa trên trung bình + độ lệch
-  const duDoanKhoang = {
-    thap: Math.max(4, Math.floor(avgLast10 - stdDev)),
-    cao: Math.min(17, Math.ceil(avgLast10 + stdDev))
-  };
-  
-  return {
-    xuHuong,
-    avgLast10,
-    stdDev,
-    vungDiemUuTien,
-    duDoanKhoang,
-    isTangMenh: xuHuong > 1,
-    isGiamManh: xuHuong < -1
-  };
-}
-
-// 5. PHÂN TÍCH BỆT VÀ CẦU (NÂNG CẤP)
-function phanTichBetVaCau(lichSu, tongData) {
-  const ketQua = { bet: null, cau11: null, cau22: null, cau32: null };
-  
-  if (lichSu.length < 3) return ketQua;
-  
-  // Bệt chi tiết
-  let streak = 1;
-  for (let i = 1; i < Math.min(lichSu.length, 15); i++) {
-    if (lichSu[i] === lichSu[0]) streak++;
+  // Chuỗi bệt
+  let bet = 1;
+  for (let i = 1; i < lichSu.length; i++) {
+    if (lichSu[i] === lichSu[0]) bet++;
     else break;
   }
   
-  if (streak >= 3) {
-    ketQua.bet = {
-      doDai: streak,
-      loai: lichSu[0],
-      duDoanLoai: lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài',
-      doTinCay: Math.min(94, 65 + (streak - 2) * 7)
-    };
-  }
-  
   // Cầu 1-1
-  if (lichSu.length >= 6) {
-    let isZigzag = true;
-    for (let i = 1; i < 6; i++) {
-      if (lichSu[i] === lichSu[i-1]) { isZigzag = false; break; }
-    }
-    if (isZigzag) {
-      ketQua.cau11 = {
-        duDoanLoai: lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài',
-        doTinCay: 82
-      };
-    }
+  let cau11 = true;
+  for (let i = 1; i < Math.min(5, lichSu.length); i++) {
+    if (lichSu[i] === lichSu[i-1]) { cau11 = false; break; }
   }
   
   // Cầu 2-2
-  if (lichSu.length >= 8) {
-    const p1 = lichSu[0] === lichSu[1];
-    const p2 = lichSu[2] === lichSu[3];
-    const p3 = lichSu[4] === lichSu[5];
-    const p4 = lichSu[6] === lichSu[7];
-    const p5 = lichSu[1] !== lichSu[2];
-    const p6 = lichSu[3] !== lichSu[4];
-    const p7 = lichSu[5] !== lichSu[6];
-    
-    if (p1 && p2 && p3 && p4 && p5 && p6 && p7) {
-      ketQua.cau22 = {
-        duDoanLoai: lichSu[4] === 'Tài' ? 'Xỉu' : 'Tài',
-        doTinCay: 86
-      };
+  let cau22 = false;
+  if (lichSu.length >= 6) {
+    cau22 = (lichSu[0] === lichSu[1] && lichSu[2] === lichSu[3] && lichSu[4] === lichSu[5] && 
+             lichSu[1] !== lichSu[2] && lichSu[3] !== lichSu[4]);
+  }
+  
+  return { bet, cau11, cau22 };
+}
+
+// 2. PHÂN TÍCH TẦN SUẤT ĐIỂM (XÁC SUẤT THỐNG KÊ)
+function phanTichTanSuatDiem(tongData) {
+  if (tongData.length < 30) return null;
+  
+  const dem = {};
+  for (let i = 0; i < tongData.length; i++) dem[tongData[i]] = (dem[tongData[i]] || 0) + 1;
+  
+  const kyVong = tongData.length / 14;
+  const diemThieu = [];
+  const diemThua = [];
+  
+  for (let d = 4; d <= 17; d++) {
+    const count = dem[d] || 0;
+    const lech = count - kyVong;
+    if (lech < -1.5) diemThieu.push({ d, lech });
+    if (lech > 1.5) diemThua.push({ d, lech });
+  }
+  
+  diemThieu.sort((a, b) => a.lech - b.lech);
+  return { diemThieu: diemThieu.slice(0, 5), diemThua: diemThua.slice(0, 3) };
+}
+
+// 3. TÍNH KHOẢNG CÁCH (ĐIỂM LÂU CHƯA VỀ)
+function diemLaUChuaVe(tongData) {
+  if (tongData.length < 30) return [];
+  
+  const lastPos = {};
+  for (let i = 0; i < tongData.length; i++) {
+    if (!lastPos[tongData[i]]) lastPos[tongData[i]] = i;
+  }
+  
+  const result = [];
+  for (let d = 4; d <= 17; d++) {
+    const pos = lastPos[d] !== undefined ? lastPos[d] : tongData.length;
+    result.push({ d, khoangCach: pos });
+  }
+  
+  result.sort((a, b) => b.khoangCach - a.khoangCach);
+  return result.slice(0, 6).map(r => r.d);
+}
+
+// 4. MARKOV CHAIN (DỰ ĐOÁN DỰA TRÊN 2-3 PHIÊN GẦN NHẤT)
+function markovPrediction(tongData) {
+  if (tongData.length < 5) return null;
+  
+  const key = `${tongData[1]}-${tongData[0]}`;
+  if (!memory[key]) memory[key] = {};
+  
+  // Cập nhật ma trận
+  for (let i = tongData.length - 2; i >= 0; i--) {
+    const k = `${tongData[i+1]}-${tongData[i]}`;
+    const next = tongData[i-1];
+    if (next) {
+      if (!memory[k]) memory[k] = {};
+      memory[k][next] = (memory[k][next] || 0) + 1;
     }
   }
   
-  // Cầu 3-2
-  if (lichSu.length >= 10) {
-    const p = lichSu.slice(0, 5).join('');
-    if (p === "TàiTàiTàiXỉuXỉu") {
-      ketQua.cau32 = { duDoanLoai: "Xỉu", doTinCay: 88 };
-    } else if (p === "XỉuXỉuXỉuTàiTài") {
-      ketQua.cau32 = { duDoanLoai: "Tài", doTinCay: 88 };
+  const stats = memory[key];
+  if (!stats) return null;
+  
+  const entries = Object.entries(stats);
+  const total = entries.reduce((s, [, c]) => s + c, 0);
+  return entries.map(([d, c]) => ({ d: parseInt(d), p: (c / total) * 100 })).sort((a, b) => b.p - a.p);
+}
+
+// 5. DỰ ĐOÁN LOẠI (TÀI/XỈU) - TỔNG HỢP ĐA CHỈ BÁO
+function duDoanLoai(lichSu, tongData) {
+  const quyLuat = timQuyLuat(lichSu);
+  const tanSuat = phanTichTanSuatDiem(tongData);
+  const diemLau = diemLaUChuaVe(tongData);
+  const markov = markovPrediction(tongData);
+  
+  let diemTai = 0, diemXiu = 0;
+  let lyDo = [];
+  
+  // 1. Quy luật chuỗi (trọng số cao)
+  if (quyLuat.bet >= 4) {
+    const duDoan = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
+    const diem = 70 + quyLuat.bet * 3;
+    duDoan === 'Tài' ? diemTai += diem : diemXiu += diem;
+    lyDo.push(`🔥 Bệt ${quyLuat.bet} phiên ${lichSu[0]}`);
+  }
+  if (quyLuat.cau11) {
+    const duDoan = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
+    duDoan === 'Tài' ? diemTai += 75 : diemXiu += 75;
+    lyDo.push(`🎯 Cầu 1-1`);
+  }
+  if (quyLuat.cau22) {
+    const duDoan = lichSu[2] === 'Tài' ? 'Xỉu' : 'Tài';
+    duDoan === 'Tài' ? diemTai += 82 : diemXiu += 82;
+    lyDo.push(`🔄 Cầu 2-2`);
+  }
+  
+  // 2. Điểm lâu chưa về
+  if (diemLau.length > 0) {
+    const diemTaiLau = diemLau.filter(d => d >= 11).length;
+    const diemXiuLau = diemLau.filter(d => d <= 10).length;
+    if (diemTaiLau > diemXiuLau) diemTai += diemTaiLau * 12;
+    else if (diemXiuLau > diemTaiLau) diemXiu += diemXiuLau * 12;
+    lyDo.push(`⏰ Điểm lâu chưa về: ${diemLau.slice(0, 3).join(',')}`);
+  }
+  
+  // 3. Điểm thiếu (Z-score)
+  if (tanSuat && tanSuat.diemThieu.length > 0) {
+    const taiThieu = tanSuat.diemThieu.filter(d => d.d >= 11).length;
+    const xiuThieu = tanSuat.diemThieu.filter(d => d.d <= 10).length;
+    if (taiThieu > xiuThieu) diemTai += taiThieu * 15;
+    else if (xiuThieu > taiThieu) diemXiu += xiuThieu * 15;
+    lyDo.push(`📊 Điểm thiếu: ${tanSuat.diemThieu.slice(0, 3).map(d => d.d).join(',')}`);
+  }
+  
+  // 4. Markov chain
+  if (markov && markov[0]) {
+    const diem = markov[0].d;
+    diem >= 11 ? diemTai += markov[0].p : diemXiu += markov[0].p;
+    lyDo.push(`🔗 Markov: ${diem} (${Math.round(markov[0].p)}%)`);
+  }
+  
+  // 5. Xu hướng tổng điểm 10 phiên
+  if (tongData.length >= 10) {
+    const avg = tongData.slice(0, 10).reduce((a, b) => a + b, 0) / 10;
+    if (avg > 12) diemXiu += 20;
+    if (avg < 9) diemTai += 20;
+    lyDo.push(`📈 TB10: ${avg.toFixed(1)}`);
+  }
+  
+  // QUYẾT ĐỊNH
+  let loai = 'Tài';
+  let doTinCay = 60;
+  
+  if (lichSu.length === 1) {
+    loai = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
+    doTinCay = 62;
+  } else if (diemTai > diemXiu) {
+    loai = 'Tài';
+    doTinCay = Math.min(94, 55 + Math.round((diemTai - diemXiu) / (diemTai + diemXiu) * 45));
+  } else if (diemXiu > diemTai) {
+    loai = 'Xỉu';
+    doTinCay = Math.min(94, 55 + Math.round((diemXiu - diemTai) / (diemTai + diemXiu) * 45));
+  } else {
+    loai = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
+    doTinCay = 64;
+  }
+  
+  return { loai, doTinCay, lyDo: lyDo.slice(0, 4).join(' | ') };
+}
+
+// 6. CHỌN 3 VỊ CỤ THỂ
+function chon3Vi(loai, tongData) {
+  const tanSuat = phanTichTanSuatDiem(tongData);
+  const diemLau = diemLaUChuaVe(tongData);
+  const markov = markovPrediction(tongData);
+  
+  const khoang = loai === 'Tài' ? [11, 12, 13, 14, 15, 16, 17] : [4, 5, 6, 7, 8, 9, 10];
+  const diemSo = {};
+  
+  // Khởi tạo điểm
+  khoang.forEach(d => diemSo[d] = 0);
+  
+  // Điểm lâu chưa về (+30)
+  diemLau.forEach(d => { if (khoang.includes(d)) diemSo[d] += 30; });
+  
+  // Điểm thiếu trong thống kê (+25)
+  if (tanSuat && tanSuat.diemThieu) {
+    tanSuat.diemThieu.forEach(item => { if (khoang.includes(item.d)) diemSo[item.d] += 25; });
+  }
+  
+  // Markov prediction (+40)
+  if (markov && markov[0] && khoang.includes(markov[0].d)) {
+    diemSo[markov[0].d] += 40;
+  }
+  
+  // Điểm có tổng đẹp (+15)
+  const diemDep = loai === 'Tài' ? [13, 14, 11, 15, 12, 16] : [7, 8, 6, 9, 5, 10];
+  diemDep.forEach((d, idx) => { if (khoang.includes(d)) diemSo[d] += (15 - idx); });
+  
+  // Sắp xếp và chọn 3 điểm cao nhất
+  const ketQua = Object.entries(diemSo)
+    .map(([d, s]) => ({ d: parseInt(d), s }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 3)
+    .map(item => item.d);
+  
+  // Nếu thiếu, bổ sung
+  if (ketQua.length < 3) {
+    const defaultList = loai === 'Tài' ? [13, 14, 11] : [7, 8, 6];
+    for (let d of defaultList) {
+      if (!ketQua.includes(d) && ketQua.length < 3) ketQua.push(d);
     }
   }
   
   return ketQua;
 }
 
-// 6. PHÂN TÍCH PATTERN LỊCH SỬ (HỌC TỪ QUÁ KHỨ)
-function phanTichPatternLichSu(lichSu, tongData) {
-  if (lichSu.length < 10 || tongData.length < 10) return null;
-  
-  const patternHienTai = lichSu.slice(0, 5).join('');
-  const diemPatternHienTai = tongData.slice(0, 5).join('-');
-  
-  // Tìm pattern tương tự trong quá khứ
-  let timThay = [];
-  for (let i = 5; i < lichSu.length - 1; i++) {
-    const pLichSu = lichSu.slice(i, i + 5).join('');
-    const pDiem = tongData.slice(i, i + 5).join('-');
-    
-    if (pLichSu === patternHienTai) {
-      timThay.push({
-        viTri: i,
-        ketQuaTiepTheo: lichSu[i - 1],
-        diemTiepTheo: tongData[i - 1]
-      });
-    }
-  }
-  
-  if (timThay.length >= 2) {
-    const demLoai = { Tài: 0, Xỉu: 0 };
-    const demDiem = {};
-    for (const t of timThay) {
-      demLoai[t.ketQuaTiepTheo]++;
-      demDiem[t.diemTiepTheo] = (demDiem[t.diemTiepTheo] || 0) + 1;
-    }
-    
-    const loaiDuDoan = demLoai.Tài > demLoai.Xỉu ? 'Tài' : 'Xỉu';
-    const diemDuDoan = Object.entries(demDiem).sort((a, b) => b[1] - a[1])[0]?.[0];
-    
-    return {
-      loaiDuDoan,
-      diemDuDoan: parseInt(diemDuDoan),
-      soLanTrung: timThay.length,
-      tyLe: (Math.max(demLoai.Tài, demLoai.Xỉu) / timThay.length) * 100
-    };
-  }
-  
-  return null;
-}
-
 // ==========================================
-// DỰ ĐOÁN 3 VỊ SIÊU CHÍNH XÁC
+// DỰ ĐOÁN 2 PHIÊN
 // ==========================================
-function duDoan3ViSieuCap(lichSu, tongData) {
-  // 1. CHẠY TẤT CẢ THUẬT TOÁN
-  const zScore = phanTichZScore(tongData);
-  const khoangCach = phanTichKhoangCachVaTrungBinh(tongData);
-  const markov = phanTichMarkovNangCao(tongData);
-  const xuHuong = phanTichXuHuongNangCao(tongData);
-  const betVaCau = phanTichBetVaCau(lichSu, tongData);
-  const pattern = phanTichPatternLichSu(lichSu, tongData);
-  
-  // 2. XÁC ĐỊNH LOẠI TÀI/XỈU (CÓ TRỌNG SỐ)
-  let diemTai = 0, diemXiu = 0;
-  let chiTietLoai = [];
-  
-  // Bet
-  if (betVaCau.bet) {
-    if (betVaCau.bet.duDoanLoai === 'Tài') diemTai += betVaCau.bet.doTinCay;
-    else diemXiu += betVaCau.bet.doTinCay;
-    chiTietLoai.push(`Bet: ${betVaCau.bet.duDoanLoai} (${betVaCau.bet.doTinCay}%)`);
-  }
-  
-  // Cầu 1-1
-  if (betVaCau.cau11) {
-    if (betVaCau.cau11.duDoanLoai === 'Tài') diemTai += betVaCau.cau11.doTinCay;
-    else diemXiu += betVaCau.cau11.doTinCay;
-    chiTietLoai.push(`Cầu 1-1: ${betVaCau.cau11.duDoanLoai}`);
-  }
-  
-  // Cầu 2-2
-  if (betVaCau.cau22) {
-    if (betVaCau.cau22.duDoanLoai === 'Tài') diemTai += betVaCau.cau22.doTinCay;
-    else diemXiu += betVaCau.cau22.doTinCay;
-    chiTietLoai.push(`Cầu 2-2: ${betVaCau.cau22.duDoanLoai}`);
-  }
-  
-  // Cầu 3-2
-  if (betVaCau.cau32) {
-    if (betVaCau.cau32.duDoanLoai === 'Tài') diemTai += betVaCau.cau32.doTinCay;
-    else diemXiu += betVaCau.cau32.doTinCay;
-    chiTietLoai.push(`Cầu 3-2: ${betVaCau.cau32.duDoanLoai}`);
-  }
-  
-  // Pattern lịch sử
-  if (pattern) {
-    if (pattern.loaiDuDoan === 'Tài') diemTai += pattern.tyLe;
-    else diemXiu += pattern.tyLe;
-    chiTietLoai.push(`Pattern: ${pattern.loaiDuDoan} (${Math.round(pattern.tyLe)}%)`);
-  }
-  
-  // Markov bậc 2 + 3
-  if (markov.duDoanBac2 && markov.duDoanBac2[0]) {
-    const diem = markov.duDoanBac2[0].diem;
-    if (diem >= 11) diemTai += markov.duDoanBac2[0].tyLe;
-    else diemXiu += markov.duDoanBac2[0].tyLe;
-    chiTietLoai.push(`Markov b2: ${diem >= 11 ? 'Tài' : 'Xỉu'} (${Math.round(markov.duDoanBac2[0].tyLe)}%)`);
-  }
-  
-  // Xu hướng
-  if (xuHuong) {
-    if (xuHuong.isTangManh) diemXiu += 15;
-    if (xuHuong.isGiamManh) diemTai += 15;
-    chiTietLoai.push(`Xu hướng: ${xuHuong.xuHuong > 0 ? 'Tăng' : 'Giảm'}`);
-  }
-  
-  let loaiDuDoan = 'Tài';
-  let doTinCayLoai = 55;
-  
-  if (lichSu.length === 1) {
-    loaiDuDoan = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
-    doTinCayLoai = 62;
-  } else if (lichSu.length === 2) {
-    if (lichSu[0] === lichSu[1]) {
-      loaiDuDoan = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
-      doTinCayLoai = 66;
-    } else {
-      loaiDuDoan = lichSu[0];
-      doTinCayLoai = 64;
-    }
-  } else if (diemTai > diemXiu) {
-    loaiDuDoan = 'Tài';
-    doTinCayLoai = Math.min(94, Math.round(55 + (diemTai - diemXiu) / (diemTai + diemXiu) * 45));
-  } else if (diemXiu > diemTai) {
-    loaiDuDoan = 'Xỉu';
-    doTinCayLoai = Math.min(94, Math.round(55 + (diemXiu - diemTai) / (diemTai + diemXiu) * 45));
-  } else {
-    loaiDuDoan = lichSu[0] === 'Tài' ? 'Xỉu' : 'Tài';
-    doTinCayLoai = 64;
-  }
-  
-  // 3. TÍNH TOÁN 3 VỊ CỤ THỂ (CÓ TRỌNG SỐ)
-  let trongSoDiem = new Map();
-  
-  // Z-Score (điểm thiếu)
-  if (zScore && zScore.diemThieuNhat) {
-    for (let i = 0; i < zScore.diemThieuNhat.length; i++) {
-      const item = zScore.diemThieuNhat[i];
-      const trongSo = Math.max(50, 100 - Math.abs(item.zScore) * 8);
-      trongSoDiem.set(item.diem, (trongSoDiem.get(item.diem) || 0) + trongSo);
-    }
-  }
-  
-  // Khoảng cách (điểm lâu chưa về)
-  if (khoangCach && khoangCach.diemLaUChuaVe) {
-    for (let i = 0; i < khoangCach.diemLaUChuaVe.length; i++) {
-      const item = khoangCach.diemLaUChuaVe[i];
-      const trongSo = Math.min(95, 60 + (item.tyLeVuotAvg * 15));
-      trongSoDiem.set(item.diem, (trongSoDiem.get(item.diem) || 0) + trongSo);
-    }
-  }
-  
-  // Điểm chưa xuất hiện (ưu tiên cao nhất)
-  if (khoangCach && khoangCach.diemChuaXuatHien) {
-    for (const diem of khoangCach.diemChuaXuatHien) {
-      trongSoDiem.set(diem, (trongSoDiem.get(diem) || 0) + 120);
-    }
-  }
-  
-  // Markov bậc 2
-  if (markov.duDoanBac2) {
-    for (const item of markov.duDoanBac2) {
-      trongSoDiem.set(item.diem, (trongSoDiem.get(item.diem) || 0) + item.tyLe + 20);
-    }
-  }
-  
-  // Markov bậc 3
-  if (markov.duDoanBac3) {
-    for (const item of markov.duDoanBac3) {
-      trongSoDiem.set(item.diem, (trongSoDiem.get(item.diem) || 0) + item.tyLe + 30);
-    }
-  }
-  
-  // Pattern lịch sử
-  if (pattern && pattern.diemDuDoan) {
-    trongSoDiem.set(pattern.diemDuDoan, (trongSoDiem.get(pattern.diemDuDoan) || 0) + pattern.tyLe);
-  }
-  
-  // Xu hướng vùng điểm
-  if (xuHuong && xuHuong.vungDiemUuTien) {
-    for (const diem of xuHuong.vungDiemUuTien) {
-      trongSoDiem.set(diem, (trongSoDiem.get(diem) || 0) + 25);
-    }
-  }
-  
-  // Trung bình trượt
-  if (khoangCach && khoangCach.ma10GanNhat) {
-    const diemGanMA = Math.round(khoangCach.ma10GanNhat);
-    trongSoDiem.set(diemGanMA, (trongSoDiem.get(diemGanMA) || 0) + 30);
-    trongSoDiem.set(diemGanMA + 1, (trongSoDiem.get(diemGanMA + 1) || 0) + 20);
-    trongSoDiem.set(diemGanMA - 1, (trongSoDiem.get(diemGanMA - 1) || 0) + 20);
-  }
-  
-  // LỌC THEO LOẠI TÀI/XỈU
-  const diemTrongLoai = Array.from(trongSoDiem.entries())
-    .filter(([diem]) => {
-      if (loaiDuDoan === 'Tài') return diem >= 11 && diem <= 17;
-      return diem >= 4 && diem <= 10;
-    })
-    .sort((a, b) => b[1] - a[1])
-    .map(([diem]) => diem);
-  
-  // CHỌN 3 ĐIỂM ĐẦU TIÊN
-  let baViCuoi = [...new Set(diemTrongLoai)].slice(0, 3);
-  
-  // NẾU THIẾU, DÙNG THUẬT TOÁN THAY THẾ THÔNG MINH
-  if (baViCuoi.length < 3) {
-    const diemTheoLoai = loaiDuDoan === 'Tài' 
-      ? [13, 14, 11, 15, 12, 16, 17] 
-      : [7, 8, 6, 9, 5, 10, 4];
-    
-    // Sắp xếp dựa trên Z-Score nếu có
-    if (zScore) {
-      const diemSapXep = [...diemTheoLoai];
-      diemSapXep.sort((a, b) => {
-        const za = zScore.diemThieuNhat.find(d => d.diem === a)?.zScore || 0;
-        const zb = zScore.diemThieuNhat.find(d => d.diem === b)?.zScore || 0;
-        return za - zb;
-      });
-      
-      for (const diem of diemSapXep) {
-        if (!baViCuoi.includes(diem) && baViCuoi.length < 3) {
-          baViCuoi.push(diem);
-        }
-      }
-    } else {
-      for (const diem of diemTheoLoai) {
-        if (!baViCuoi.includes(diem) && baViCuoi.length < 3) {
-          baViCuoi.push(diem);
-        }
-      }
-    }
-  }
-  
-  baViCuoi = baViCuoi.slice(0, 3);
-  
-  // 4. TỔNG HỢP LÝ DO
-  let lyDo = [];
-  if (betVaCau.bet) lyDo.push(`🔥 Bệt ${betVaCau.bet.doDai} phiên ${betVaCau.bet.loai}`);
-  if (betVaCau.cau11) lyDo.push(`🎯 Cầu 1-1`);
-  if (betVaCau.cau22) lyDo.push(`🔄 Cầu 2-2`);
-  if (pattern) lyDo.push(`📚 Pattern: ${pattern.soLanTrung} lần trùng`);
-  if (xuHuong && Math.abs(xuHuong.xuHuong) > 1) {
-    lyDo.push(`📈 Xu hướng ${xuHuong.xuHuong > 0 ? 'TĂNG' : 'GIẢM'} (${Math.abs(xuHuong.xuHuong).toFixed(1)}đ)`);
-  }
-  if (zScore && zScore.diemThieuNhat.length > 0) {
-    lyDo.push(`📊 Điểm thiếu: ${zScore.diemThieuNhat.slice(0, 3).map(d => d.diem).join(', ')}`);
-  }
-  if (khoangCach && khoangCach.diemLaUChuaVe.length > 0) {
-    lyDo.push(`⏰ Lâu chưa về: ${khoangCach.diemLaUChuaVe.slice(0, 3).map(d => d.diem).join(', ')}`);
-  }
-  if (markov.duDoanBac2 && markov.duDoanBac2[0]) {
-    lyDo.push(`🔗 Markov b2: ${markov.duDoanBac2[0].diem} (${Math.round(markov.duDoanBac2[0].tyLe)}%)`);
-  }
-  if (markov.duDoanBac3 && markov.duDoanBac3[0]) {
-    lyDo.push(`🔗🔗 Markov b3: ${markov.duDoanBac3[0].diem} (${Math.round(markov.duDoanBac3[0].tyLe)}%)`);
-  }
-  
-  const lyDoChinh = lyDo.length > 0 ? lyDo.slice(0, 5).join(' | ') : 'Phân tích đa tầng';
-  
-  return {
-    duDoanLoai: loaiDuDoan,
-    doTinCay: doTinCayLoai,
-    baViCuThe: baViCuoi,
-    lyDo: lyDoChinh,
-    chiTiet: chiTietLoai
-  };
-}
-
-// ==========================================
-// XỬ LÝ GAME CHÍNH
-// ==========================================
-async function xuLyGame() {
+async function duDoan2Phien() {
   const rawData = await fetchData();
-  if (!rawData || rawData.length === 0) throw new Error('Không lấy được dữ liệu từ API');
+  if (!rawData) throw new Error('Không lấy được dữ liệu');
   
-  // Cập nhật dữ liệu mới
+  // Cập nhật dữ liệu
   for (const item of rawData) {
-    const daTonTai = gameData.data.find(x => x.phien === item.phien);
-    if (!daTonTai) {
+    const exists = gameData.data.find(x => x.phien === item.phien);
+    if (!exists) {
       gameData.data.unshift(item);
       if (item.tong) gameData.tongData.unshift(item.tong);
     }
   }
   
-  // Giới hạn dung lượng
-  if (gameData.data.length > 300) gameData.data = gameData.data.slice(0, 300);
-  if (gameData.tongData.length > 300) gameData.tongData = gameData.tongData.slice(0, 300);
+  if (gameData.data.length > 200) gameData.data = gameData.data.slice(0, 200);
+  if (gameData.tongData.length > 200) gameData.tongData = gameData.tongData.slice(0, 200);
   
   const current = gameData.data[0];
-  const phienHienTai = current?.phien;
-  const ketQuaThucTe = current?.ket_qua;
-  
-  // Kiểm tra dự đoán cũ
-  if (gameData.lichSuDuDoan.length > 0 && gameData.lichSuDuDoan[0].ket_qua === 'CHỜ' && ketQuaThucTe) {
-    const lastPred = gameData.lichSuDuDoan[0];
-    if (lastPred.du_doan_loai) {
-      const dung = (ketQuaThucTe === lastPred.du_doan_loai);
-      if (dung) stats.dung++;
-      else stats.sai++;
-      stats.tong++;
-      stats.tiLe = ((stats.dung / stats.tong) * 100).toFixed(1) + '%';
-      lastPred.ket_qua = dung ? 'ĐÚNG' : 'SAI';
-      lastPred.thuc_te = ketQuaThucTe;
-    }
-  }
-  
-  // Lấy lịch sử
   const lichSu = gameData.data.map(d => d.ket_qua).filter(k => k === 'Tài' || k === 'Xỉu');
   const tongData = gameData.tongData;
   
-  // DỰ ĐOÁN
-  const duDoan = duDoan3ViSieuCap(lichSu, tongData);
+  // KIỂM TRA DỰ ĐOÁN CŨ
+  if (gameData.lichSuDuDoan.length > 0 && gameData.lichSuDuDoan[0].ket_qua === 'CHỜ' && current?.ket_qua) {
+    const last = gameData.lichSuDuDoan[0];
+    if (last.du_doan_loai) {
+      const dung = current.ket_qua === last.du_doan_loai;
+      dung ? stats.dung++ : stats.sai++;
+      stats.tong++;
+      stats.tiLe = ((stats.dung / stats.tong) * 100).toFixed(1) + '%';
+      last.ket_qua = dung ? 'ĐÚNG' : 'SAI';
+      last.thuc_te = current.ket_qua;
+    }
+  }
   
-  // Lưu dự đoán
+  // DỰ ĐOÁN PHIÊN 1
+  const p1 = duDoanLoai(lichSu, tongData);
+  const v1 = chon3Vi(p1.loai, tongData);
+  
+  // DỰ ĐOÁN PHIÊN 2 (dùng dữ liệu giả định)
+  const lichSuGia = [p1.loai, ...lichSu];
+  const tongDataGia = [v1[0], ...tongData];
+  const p2 = duDoanLoai(lichSuGia, tongDataGia);
+  const v2 = chon3Vi(p2.loai, tongDataGia);
+  
+  // LƯU DỰ ĐOÁN
   gameData.lichSuDuDoan.unshift({
-    phien: phienHienTai,
-    du_doan_loai: duDoan.duDoanLoai,
-    ba_vi_cu_the: duDoan.baViCuThe,
-    do_tin_cay: duDoan.doTinCay,
-    ly_do: duDoan.lyDo,
+    phien: current?.phien,
+    du_doan_loai: p1.loai,
+    ba_vi: v1,
+    do_tin_cay: p1.doTinCay,
+    ly_do: p1.lyDo,
     ket_qua: 'CHỜ',
     thoi_gian: Date.now()
   });
   if (gameData.lichSuDuDoan.length > 100) gameData.lichSuDuDoan.pop();
   
-  const coNenCuoc = duDoan.doTinCay >= 68;
-  
-  // Format output
   return {
     success: true,
     game: 'sunwin_sicbo',
     current: {
-      phien: phienHienTai,
-      ket_qua: ketQuaThucTe,
+      phien: current?.phien,
+      ket_qua: current?.ket_qua,
       vi: current ? `${current.v1} - ${current.v2} - ${current.v3}` : '? - ? - ?',
       tong: current?.tong || '?'
     },
     du_doan: {
-      phien_tiep: phienHienTai + 1,
-      du_doan: duDoan.duDoanLoai,
-      vi_cuoc: duDoan.baViCuThe.join(', '),
-      ti_le: duDoan.doTinCay + '%',
-      id: '@tranhoang2286',
-      co_nen_cuoc: coNenCuoc ? '✅ NÊN CƯỢC' : '⏸️ BỎ QUA',
-      ly_do: duDoan.lyDo,
-      chi_tiet: duDoan.chiTiet
+      phien_1: (current?.phien || 0) + 1,
+      du_doan_1: p1.loai,
+      vi_cuoc_1: v1.join(', '),
+      ti_le_1: p1.doTinCay + '%',
+      ly_do_1: p1.lyDo,
+      
+      phien_2: (current?.phien || 0) + 2,
+      du_doan_2: p2.loai,
+      vi_cuoc_2: v2.join(', '),
+      ti_le_2: p2.doTinCay + '%',
+      ly_do_2: p2.lyDo
     },
     thong_ke: stats,
-    lich_su_gan_day: lichSu.slice(0, 12)
+    id: '@tranhoang2286',
+    lich_su: lichSu.slice(0, 10)
   };
 }
 
 // ==========================================
-// API ENDPOINTS
+// API
 // ==========================================
-
 app.get('/api/games', (req, res) => {
-  res.json({ 
-    games: ['sunwin_sicbo'], 
-    total: 1,
-    author: '@tranhoang2286'
-  });
+  res.json({ games: ['sunwin_sicbo'], total: 1, author: '@tranhoang2286' });
 });
 
 app.get('/api/predict/sunwin_sicbo', async (req, res) => {
   try {
-    const result = await xuLyGame();
+    const result = await duDoan2Phien();
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -720,7 +367,7 @@ app.get('/api/predict/sunwin_sicbo', async (req, res) => {
 
 app.get('/api/predict', async (req, res) => {
   try {
-    const result = await xuLyGame();
+    const result = await duDoan2Phien();
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -729,72 +376,40 @@ app.get('/api/predict', async (req, res) => {
 
 app.post('/api/feedback', (req, res) => {
   const { du_doan, ket_qua_thuc_te } = req.body;
-  
   if (!du_doan || !ket_qua_thuc_te) {
     return res.status(400).json({ error: 'Thiếu du_doan hoặc ket_qua_thuc_te' });
   }
-  
-  const dung = (du_doan === ket_qua_thuc_te);
+  const dung = du_doan === ket_qua_thuc_te;
   if (dung) stats.dung++;
   else stats.sai++;
   stats.tong++;
   stats.tiLe = ((stats.dung / stats.tong) * 100).toFixed(1) + '%';
-  
-  gameData.feedbackHistory.unshift({
-    du_doan, 
-    thuc_te: ket_qua_thuc_te, 
-    ket_qua: dung ? 'ĐÚNG' : 'SAI', 
-    thoi_gian: Date.now()
-  });
-  
   res.json({ success: true, dung, stats });
 });
 
-app.get('/api/stats', (req, res) => {
-  res.json(stats);
-});
-
-app.get('/api/stats/sunwin_sicbo', (req, res) => {
-  res.json(stats);
-});
+app.get('/api/stats', (req, res) => res.json(stats));
 
 app.get('/', (req, res) => {
   res.json({
-    name: '🔥 SUNWIN SICBO - THUẬT TOÁN SIÊU CẤP 🔥',
+    name: '🔥 SUNWIN SICBO - SIÊU THUẬT TOÁN 🔥',
     author: '@tranhoang2286',
-    version: '4.0',
-    thuat_toan: [
-      '📊 Z-Score phân phối điểm (phát hiện điểm thiếu chính xác)',
-      '⏰ Khoảng cách xuất hiện + Trung bình trượt 10 phiên',
-      '🔗 Markov Chain bậc 2 và bậc 3 (2 lớp)',
-      '📈 Xu hướng RSI đơn giản hóa + Độ lệch chuẩn',
-      '🔥 Bệt (cấp độ 3-4-5-6-7+)',
-      '🎯 Cầu 1-1, 2-2, 3-2',
-      '📚 Pattern lịch sử (học từ quá khứ)'
-    ],
-    cach_du_doan: 'Tổng hợp trọng số từ 9 thuật toán, chọn 3 điểm cao nhất',
+    version: '5.0',
+    thuat_toan: ['Bệt (4-7+)', 'Cầu 1-1, 2-2', 'Z-Score thống kê', 'Khoảng cách điểm', 'Markov Chain', 'Trung bình 10 phiên'],
+    cach_du_doan: 'Dự đoán 2 phiên liên tiếp, mỗi phiên 3 vị cụ thể',
     endpoints: {
       'Dự đoán': 'GET /api/predict/sunwin_sicbo',
-      'Thống kê': 'GET /api/stats/sunwin_sicbo',
-      'Feedback': 'POST /api/feedback'
+      'Feedback': 'POST /api/feedback',
+      'Stats': 'GET /api/stats'
     }
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`\n============================================================`);
-  console.log(`🔥 SUNWIN SICBO - THUẬT TOÁN SIÊU CẤP 🔥`);
+  console.log(`🔥 SUNWIN SICBO - SIÊU THUẬT TOÁN 🔥`);
   console.log(`============================================================`);
-  console.log(`🎯 9 THUẬT TOÁN ĐA TẦNG:`);
-  console.log(`   1. Z-Score phân phối điểm`);
-  console.log(`   2. Khoảng cách xuất hiện + MA10`);
-  console.log(`   3. Markov Chain bậc 2`);
-  console.log(`   4. Markov Chain bậc 3`);
-  console.log(`   5. Xu hướng + Độ lệch chuẩn`);
-  console.log(`   6. Bệt (3-4-5-6-7+)`);
-  console.log(`   7. Cầu 1-1, 2-2, 3-2`);
-  console.log(`   8. Pattern lịch sử`);
-  console.log(`   9. Trung bình trượt 10 phiên`);
+  console.log(`🎯 Dự đoán 2 phiên liên tiếp | 3 vị cụ thể mỗi phiên`);
+  console.log(`🧠 Thuật toán: Bệt | Cầu | Z-Score | Khoảng cách | Markov | TB10`);
   console.log(`🚀 PORT: ${PORT}`);
   console.log(`============================================================\n`);
 });
