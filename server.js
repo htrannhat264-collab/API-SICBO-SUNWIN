@@ -3,271 +3,288 @@ const axios = require("axios");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const URL_TX = "https://wtx.tele68.com/v1/tx/sessions";
-const URL_MD5 = "https://wtxmd52.tele68.com/v1/txmd5/sessions";
+
+// Cấu hình API
+const API_SUNWIN = "https://sun-win.onrender.com/api/history";
+const API_B52 = "https://b52-qiw2.onrender.com/api/history";
 
 const HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://tele68.com/",
-    "Origin": "https://tele68.com"
+    "Accept": "application/json, text/plain, */*"
 };
 
-const http = axios.create({ timeout: 10000, headers: HEADERS });
+const http = axios.create({ timeout: 15000, headers: HEADERS });
 
 // ============================================================
-// ========== HỆ THỐNG PHÂN TÍCH CẦU CHI TIẾT ==========
+// ========== PHẦN 1: HÀM TIỆN ÍCH CƠ BẢN ==========
 // ============================================================
 
-// 1. PHÁT HIỆN CẦU BỆT (CHUỖI LIÊN TIẾP GIỐNG NHAU)
-function phatHienCauBet(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 3) return null;
-    
-    let doDaiBet = 1;
-    let giaTriBet = lichSuKQ[0];
-    
-    for (let i = 1; i < lichSuKQ.length; i++) {
-        if (lichSuKQ[i] === giaTriBet) doDaiBet++;
+function opp(cuu) {
+    return cuu === "Tài" ? "Xỉu" : "Tài";
+}
+
+function toSymbol(kq) {
+    return kq === "Tài" ? "T" : "X";
+}
+
+// Lấy độ dài bệt từ cuối lên
+function get_streak(res) {
+    if (!res || res.length === 0) return [0, null];
+    let s = 1;
+    for (let i = res.length - 2; i >= 0; i--) {
+        if (res[i] === res[res.length - 1]) s++;
         else break;
     }
-    
-    if (doDaiBet < 3) return null;
-    
-    // Phân tích cấp độ bệt
-    let doTinCay = 0;
-    let khuyenNghi = "";
-    
-    if (doDaiBet >= 7) {
-        doTinCay = 88;
-        khuyenNghi = "BỆT QUÁ DÀI - CHẮC CHẮN ĐẢO";
-    } else if (doDaiBet === 6) {
-        doTinCay = 84;
-        khuyenNghi = "BỆT 6 - RẤT DỄ ĐẢO";
-    } else if (doDaiBet === 5) {
-        doTinCay = 78;
-        khuyenNghi = "BỆT 5 - KHẢ NĂNG ĐẢO CAO";
-    } else if (doDaiBet === 4) {
-        doTinCay = 70;
-        khuyenNghi = "BỆT 4 - CÓ THỂ ĐẢO";
-    } else if (doDaiBet === 3) {
-        doTinCay = 62;
-        khuyenNghi = "BỆT 3 - THEO HOẶC ĐẢO";
-    }
-    
-    const duDoan = giaTriBet === "TAI" ? "XỈU" : "TÀI";
-    
-    return {
-        coCau: true,
-        loaiCau: `BỆT ${doDaiBet}`,
-        doDai: doDaiBet,
-        duDoan: duDoan,
-        doTinCay: doTinCay,
-        khuyenNghi: khuyenNghi,
-        phanTich: `Phát hiện chuỗi ${doDaiBet} phiên ${giaTriBet === "TAI" ? "TÀI" : "XỈU"} liên tiếp`
-    };
+    return [s, res[res.length - 1]];
 }
 
-// 2. PHÁT HIỆN CẦU 1-1 (TÀI XỈU ĐAN XEN)
-function phatHienCau11(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 6) return null;
-    
-    let doDaiCau = 1;
-    let dangCau11 = true;
-    
-    for (let i = 1; i < Math.min(lichSuKQ.length, 15); i++) {
-        if (lichSuKQ[i] === lichSuKQ[i-1]) {
-            dangCau11 = false;
-            break;
+// Lấy độ dài bệt từ đầu xuống
+function get_streak_from_start(res) {
+    if (!res || res.length === 0) return [0, null];
+    let s = 1;
+    for (let i = 1; i < res.length; i++) {
+        if (res[i] === res[0]) s++;
+        else break;
+    }
+    return [s, res[0]];
+}
+
+// Lấy bệt dài nhất trong lịch sử
+function get_max_streak(res) {
+    if (!res || res.length === 0) return 0;
+    let maxStreak = 1, currentStreak = 1;
+    for (let i = 1; i < res.length; i++) {
+        if (res[i] === res[i-1]) {
+            currentStreak++;
+            maxStreak = Math.max(maxStreak, currentStreak);
+        } else {
+            currentStreak = 1;
         }
-        doDaiCau++;
+    }
+    return maxStreak;
+}
+
+// Tính tỷ lệ phần trăm
+function tyLe(so, tong) {
+    if (tong === 0) return 0;
+    return Math.round((so / tong) * 100);
+}
+
+// ============================================================
+// ========== PHẦN 2: HÀM PHÁT HIỆN CẦU CHI TIẾT ==========
+// ============================================================
+
+// 2.1 PHÁT HIỆN BỆT (10 CẤP ĐỘ)
+function phatHienBet(res) {
+    if (res.length < 3) return { coCau: false };
+    
+    const [streak, cur] = get_streak(res);
+    
+    if (streak >= 10) {
+        return {
+            coCau: true, loaiCau: "BỆT SIÊU CỰC ĐẠI",
+            doDai: streak, duDoan: opp(cur), doTinCay: 96,
+            khuyenNghi: "CHẮC CHẮN ĐẢO - CƯỢC MẠNH",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp - Cực kỳ hiếm gặp`
+        };
+    }
+    if (streak >= 8) {
+        return {
+            coCau: true, loaiCau: "BỆT CỰC ĐẠI",
+            doDai: streak, duDoan: opp(cur), doTinCay: 92,
+            khuyenNghi: "RẤT CHẮC CHẮN ĐẢO - CƯỢC MẠNH",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp`
+        };
+    }
+    if (streak >= 7) {
+        return {
+            coCau: true, loaiCau: "BỆT RẤT DÀI",
+            doDai: streak, duDoan: opp(cur), doTinCay: 88,
+            khuyenNghi: "RẤT CHẮC CHẮN ĐẢO - CƯỢC MẠNH",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp`
+        };
+    }
+    if (streak >= 6) {
+        return {
+            coCau: true, loaiCau: "BỆT DÀI",
+            doDai: streak, duDoan: opp(cur), doTinCay: 84,
+            khuyenNghi: "CHẮC CHẮN ĐẢO - CƯỢC MẠNH",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp`
+        };
+    }
+    if (streak >= 5) {
+        return {
+            coCau: true, loaiCau: "BỆT TRUNG BÌNH",
+            doDai: streak, duDoan: opp(cur), doTinCay: 78,
+            khuyenNghi: "CÓ THỂ ĐẢO - CƯỢC NHẸ",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp`
+        };
+    }
+    if (streak >= 4) {
+        return {
+            coCau: true, loaiCau: "BỆT NGẮN",
+            doDai: streak, duDoan: opp(cur), doTinCay: 70,
+            khuyenNghi: "CÓ THỂ ĐẢO - CÂN NHẮC",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp`
+        };
+    }
+    if (streak >= 3) {
+        return {
+            coCau: true, loaiCau: "BỆT RẤT NGẮN",
+            doDai: streak, duDoan: cur, doTinCay: 60,
+            khuyenNghi: "THEO CẦU - CƯỢC NHẸ",
+            giaiThich: `Phát hiện ${streak} phiên ${cur === "Tài" ? "TÀI" : "XỈU"} liên tiếp, theo xu hướng`
+        };
     }
     
-    if (!dangCau11 || doDaiCau < 5) return null;
+    return { coCau: false };
+}
+
+// 2.2 PHÁT HIỆN CẦU 1-1 (T X T X T X...)
+function phatHienCau11(res) {
+    if (res.length < 6) return { coCau: false };
+    
+    let doDai = 1;
+    for (let i = 1; i < Math.min(res.length, 15); i++) {
+        if (res[i] === res[i-1]) break;
+        doDai = i + 1;
+    }
+    
+    if (doDai < 5) return { coCau: false };
     
     let doTinCay = 0;
-    let khuyenNghi = "";
-    
-    if (doDaiCau >= 10) {
-        doTinCay = 85;
-        khuyenNghi = "CẦU 1-1 RẤT DÀI - THEO CẦU";
-    } else if (doDaiCau >= 8) {
-        doTinCay = 80;
-        khuyenNghi = "CẦU 1-1 DÀI - THEO CẦU";
-    } else if (doDaiCau >= 6) {
-        doTinCay = 74;
-        khuyenNghi = "CẦU 1-1 ĐANG CHẠY - THEO CẦU";
-    } else {
-        doTinCay = 68;
-        khuyenNghi = "CẦU 1-1 MỚI HÌNH THÀNH";
-    }
-    
-    const duDoan = lichSuKQ[0] === "TAI" ? "XỈU" : "TÀI";
+    if (doDai >= 12) doTinCay = 88;
+    else if (doDai >= 10) doTinCay = 84;
+    else if (doDai >= 8) doTinCay = 80;
+    else if (doDai >= 6) doTinCay = 74;
+    else doTinCay = 68;
     
     return {
-        coCau: true,
-        loaiCau: `CẦU 1-1 (${doDaiCau} phiên)`,
-        doDai: doDaiCau,
-        duDoan: duDoan,
-        doTinCay: doTinCay,
-        khuyenNghi: khuyenNghi,
-        phanTich: `Phát hiện cầu đan xen Tài-Xỉu kéo dài ${doDaiCau} phiên`
+        coCau: true, loaiCau: "CẦU 1-1",
+        doDai: doDai, duDoan: opp(res[0]), doTinCay: doTinCay,
+        khuyenNghi: "THEO CẦU - CƯỢC THEO QUY LUẬT",
+        giaiThich: `Phát hiện cầu đan xen ${doDai} phiên: ${res.slice(0, doDai).map(r => r === "Tài" ? "T" : "X").join('-')}`
     };
 }
 
-// 3. PHÁT HIỆN CẦU 2-2 (CẶP ĐÔI)
-function phatHienCau22(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 8) return null;
+// 2.3 PHÁT HIỆN CẦU 2-2 (TT XX TT XX...)
+function phatHienCau22(res) {
+    if (res.length < 8) return { coCau: false };
     
     let soCap = 0;
-    let dangCau22 = true;
+    let isCau22 = true;
     
-    for (let i = 0; i < Math.min(lichSuKQ.length, 16); i += 2) {
-        if (i + 1 >= lichSuKQ.length) break;
-        if (lichSuKQ[i] !== lichSuKQ[i+1]) {
-            dangCau22 = false;
-            break;
-        }
-        if (i + 2 < lichSuKQ.length && lichSuKQ[i] === lichSuKQ[i+2]) {
-            dangCau22 = false;
-            break;
-        }
+    for (let i = 0; i < Math.min(res.length, 16); i += 2) {
+        if (i + 1 >= res.length) break;
+        if (res[i] !== res[i+1]) { isCau22 = false; break; }
+        if (i + 2 < res.length && res[i] === res[i+2]) { isCau22 = false; break; }
         soCap++;
     }
     
-    if (!dangCau22 || soCap < 3) return null;
+    if (!isCau22 || soCap < 3) return { coCau: false };
     
     let doTinCay = 0;
-    let khuyenNghi = "";
+    if (soCap >= 6) doTinCay = 90;
+    else if (soCap >= 5) doTinCay = 86;
+    else if (soCap >= 4) doTinCay = 82;
+    else doTinCay = 76;
     
-    if (soCap >= 5) {
-        doTinCay = 86;
-        khuyenNghi = "CẦU 2-2 SIÊU DÀI - BẺ CẦU";
-    } else if (soCap >= 4) {
-        doTinCay = 82;
-        khuyenNghi = "CẦU 2-2 RẤT DÀI - BẺ CẦU";
-    } else if (soCap >= 3) {
-        doTinCay = 76;
-        khuyenNghi = "CẦU 2-2 ĐANG CHẠY - BẺ CẦU";
-    }
-    
-    const viTriCuoi = (soCap - 1) * 2;
-    const duDoan = lichSuKQ[viTriCuoi] === "TAI" ? "XỈU" : "TÀI";
+    const duDoan = opp(res[soCap * 2 - 2]);
     
     return {
-        coCau: true,
-        loaiCau: `CẦU 2-2 (${soCap} cặp)`,
-        doDai: soCap * 2,
-        duDoan: duDoan,
-        doTinCay: doTinCay,
-        khuyenNghi: khuyenNghi,
-        phanTich: `Phát hiện cầu ${soCap} cặp đôi (${lichSuKQ[0] === "TAI" ? "TT" : "XX"} ${lichSuKQ[2] === "TAI" ? "TT" : "XX"}...)`
+        coCau: true, loaiCau: "CẦU 2-2",
+        doDai: soCap * 2, soCap: soCap, duDoan: duDoan, doTinCay: doTinCay,
+        khuyenNghi: "BẺ CẦU - CƯỢC CỬA NGƯỢC CẶP CUỐI",
+        giaiThich: `Phát hiện ${soCap} cặp đôi: ${res.slice(0, soCap*2).map(r => r === "Tài" ? "T" : "X").join('')}`
     };
 }
 
-// 4. PHÁT HIỆN CẦU 3-2 (3 TÀI - 2 XỈU HOẶC NGƯỢC LẠI)
-function phatHienCau32(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 10) return null;
+// 2.4 PHÁT HIỆN CẦU 3-2 (TTT XX hoặc XXX TT)
+function phatHienCau32(res) {
+    if (res.length < 10) return { coCau: false };
     
-    const p5 = lichSuKQ.slice(0, 5);
-    const p5Str = p5.map(k => k === "TAI" ? "T" : "X").join('');
+    const p5 = res.slice(0, 5);
+    const p5Str = p5.map(r => r === "Tài" ? "T" : "X").join('');
     
     if (p5Str === "TTTXX") {
         return {
-            coCau: true,
-            loaiCau: "CẦU 3-2 (3T-2X)",
-            doDai: 5,
-            duDoan: "XỈU",
-            doTinCay: 78,
-            khuyenNghi: "CẦU 3 TÀI 2 XỈU - TIẾP TỤC XỈU",
-            phanTich: "Phát hiện cầu 3 Tài - 2 Xỉu, dự đoán Xỉu ở nhịp tiếp theo"
+            coCau: true, loaiCau: "CẦU 3-2",
+            doDai: 5, pattern: "3T-2X", duDoan: "Xỉu", doTinCay: 82,
+            khuyenNghi: "THEO CẦU - CƯỢC XỈU",
+            giaiThich: "Phát hiện cầu 3 Tài - 2 Xỉu (TTTXX), nhịp tiếp theo là Xỉu"
         };
     }
-    
     if (p5Str === "XXXTT") {
         return {
-            coCau: true,
-            loaiCau: "CẦU 3-2 (3X-2T)",
-            doDai: 5,
-            duDoan: "TÀI",
-            doTinCay: 78,
-            khuyenNghi: "CẦU 3 XỈU 2 TÀI - TIẾP TỤC TÀI",
-            phanTich: "Phát hiện cầu 3 Xỉu - 2 Tài, dự đoán Tài ở nhịp tiếp theo"
+            coCau: true, loaiCau: "CẦU 3-2",
+            doDai: 5, pattern: "3X-2T", duDoan: "Tài", doTinCay: 82,
+            khuyenNghi: "THEO CẦU - CƯỢC TÀI",
+            giaiThich: "Phát hiện cầu 3 Xỉu - 2 Tài (XXXTT), nhịp tiếp theo là Tài"
         };
     }
     
-    return null;
+    return { coCau: false };
 }
 
-// 5. PHÁT HIỆN CẦU 3-3 (3 TÀI - 3 XỈU)
-function phatHienCau33(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 12) return null;
+// 2.5 PHÁT HIỆN CẦU 3-3 (TTT XXX TTT...)
+function phatHienCau33(res) {
+    if (res.length < 12) return { coCau: false };
     
-    const p6 = lichSuKQ.slice(0, 6);
-    const p6Str = p6.map(k => k === "TAI" ? "T" : "X").join('');
+    const p6 = res.slice(0, 6);
+    const p6Str = p6.map(r => r === "Tài" ? "T" : "X").join('');
     
     if (p6Str === "TTTXXX" || p6Str === "XXXTTT") {
-        const duDoan = p6Str === "TTTXXX" ? "TÀI" : "XỈU";
+        const duDoan = p6Str === "TTTXXX" ? "Tài" : "Xỉu";
         return {
-            coCau: true,
-            loaiCau: `CẦU 3-3 (${p6Str === "TTTXXX" ? "3T-3X" : "3X-3T"})`,
-            doDai: 6,
-            duDoan: duDoan,
-            doTinCay: 82,
-            khuyenNghi: "CẦU 3-3 ĐANG CHẠY - THEO CẦU",
-            phanTich: `Phát hiện cầu ${p6Str === "TTTXXX" ? "3 Tài - 3 Xỉu" : "3 Xỉu - 3 Tài"}`
+            coCau: true, loaiCau: "CẦU 3-3",
+            doDai: 6, pattern: p6Str === "TTTXXX" ? "3T-3X" : "3X-3T", duDoan: duDoan, doTinCay: 86,
+            khuyenNghi: "THEO CẦU - CƯỢC THEO QUY LUẬT",
+            giaiThich: `Phát hiện cầu ${p6Str === "TTTXXX" ? "3 Tài - 3 Xỉu" : "3 Xỉu - 3 Tài"}`
         };
     }
     
-    return null;
+    return { coCau: false };
 }
 
-// 6. PHÁT HIỆN CẦU 1-2-1 (TÀI - XỈU XỈU - TÀI)
-function phatHienCau121(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 6) return null;
+// 2.6 PHÁT HIỆN CẦU 1-2-1 (T X X T)
+function phatHienCau121(res) {
+    if (res.length < 6) return { coCau: false };
     
-    const p5 = lichSuKQ.slice(0, 5);
+    const p5 = res.slice(0, 5);
     if (p5[0] === p5[2] && p5[0] === p5[4] && p5[1] === p5[3] && p5[0] !== p5[1]) {
-        const duDoan = p5[0] === "TAI" ? "XỈU" : "TÀI";
         return {
-            coCau: true,
-            loaiCau: "CẦU 1-2-1",
-            doDai: 5,
-            duDoan: duDoan,
-            doTinCay: 74,
-            khuyenNghi: "CẦU 1-2-1 - BẺ CẦU",
-            phanTich: `Phát hiện cầu ${p5[0] === "TAI" ? "T-X-X-T" : "X-T-T-X"}`
+            coCau: true, loaiCau: "CẦU 1-2-1",
+            doDai: 5, pattern: p5[0] === "Tài" ? "T-X-X-T" : "X-T-T-X", duDoan: opp(p5[0]), doTinCay: 78,
+            khuyenNghi: "BẺ CẦU - CƯỢC CỬA NGƯỢC",
+            giaiThich: `Phát hiện cầu 1-2-1: ${p5[0] === "Tài" ? "Tài - Xỉu - Xỉu - Tài" : "Xỉu - Tài - Tài - Xỉu"}`
         };
     }
     
-    return null;
+    return { coCau: false };
 }
 
-// 7. PHÁT HIỆN CẦU 2-1-2 (TÀI TÀI - XỈU - TÀI TÀI)
-function phatHienCau212(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 7) return null;
+// 2.7 PHÁT HIỆN CẦU 2-1-2 (TT X TT)
+function phatHienCau212(res) {
+    if (res.length < 7) return { coCau: false };
     
-    const p6 = lichSuKQ.slice(0, 6);
+    const p6 = res.slice(0, 6);
     if (p6[0] === p6[1] && p6[3] === p6[4] && p6[0] !== p6[2] && p6[2] === p6[5] && p6[0] !== p6[3]) {
-        const duDoan = p6[3] === "TAI" ? "XỈU" : "TÀI";
         return {
-            coCau: true,
-            loaiCau: "CẦU 2-1-2",
-            doDai: 6,
-            duDoan: duDoan,
-            doTinCay: 76,
-            khuyenNghi: "CẦU 2-1-2 - BẺ CẦU",
-            phanTich: `Phát hiện cầu ${p6[0] === "TAI" ? "TT-X-TT" : "XX-T-XX"}`
+            coCau: true, loaiCau: "CẦU 2-1-2",
+            doDai: 6, pattern: p6[0] === "Tài" ? "TT-X-TT" : "XX-T-XX", duDoan: opp(p6[3]), doTinCay: 80,
+            khuyenNghi: "BẺ CẦU - CƯỢC CỬA NGƯỢC",
+            giaiThich: `Phát hiện cầu 2-1-2: ${p6[0] === "Tài" ? "Tài Tài - Xỉu - Tài Tài" : "Xỉu Xỉu - Tài - Xỉu Xỉu"}`
         };
     }
     
-    return null;
+    return { coCau: false };
 }
 
-// 8. PHÁT HIỆN CHU KỲ LẶP LẠI
-function phatHienChuKy(lichSuKQ) {
-    if (!lichSuKQ || lichSuKQ.length < 20) return null;
+// 2.8 PHÁT HIỆN CHU KỲ LẶP LẠI
+function phatHienChuKy(res) {
+    if (res.length < 20) return { coCau: false };
     
-    const chuoi = lichSuKQ.map(k => k === "TAI" ? "T" : "X").join('');
+    const chuoi = res.map(r => r === "Tài" ? "T" : "X").join('');
     
     for (let doDai = 2; doDai <= 7; doDai++) {
         let giongNhau = true;
@@ -279,295 +296,531 @@ function phatHienChuKy(lichSuKQ) {
         }
         if (giongNhau && chuoi.length >= doDai * 2) {
             const viTri = chuoi.length % doDai;
-            const duDoan = chuoi[viTri] === "T" ? "TÀI" : "XỈU";
+            const duDoan = chuoi[viTri] === "T" ? "Tài" : "Xỉu";
             return {
-                coCau: true,
-                loaiCau: `CHU KỲ ${doDai}`,
-                doDai: doDai,
-                duDoan: duDoan,
-                doTinCay: 70,
-                khuyenNghi: `CHU KỲ ${doDai} PHIÊN - THEO CHU KỲ`,
-                phanTich: `Phát hiện chu kỳ lặp lại mỗi ${doDai} phiên`
+                coCau: true, loaiCau: "CHU KỲ LẶP LẠI",
+                doDai: doDai, duDoan: duDoan, doTinCay: 76,
+                khuyenNghi: `THEO CHU KỲ ${doDai} PHIÊN`,
+                giaiThich: `Phát hiện chu kỳ lặp lại mỗi ${doDai} phiên. Mẫu: ${chuoi.slice(0, doDai*2)}`
             };
         }
+    }
+    
+    return { coCau: false };
+}
+
+// ============================================================
+// ========== PHẦN 3: PHÂN TÍCH THỐNG KÊ ==========
+// ============================================================
+
+// 3.1 PHÂN TÍCH TẦN SUẤT (NHIỀU KHUNG)
+function phanTichTanSuat(res) {
+    const result = [];
+    
+    // Khung 10 phiên
+    if (res.length >= 10) {
+        const last10 = res.slice(0, 10);
+        const tai10 = last10.filter(k => k === "Tài").length;
+        if (tai10 >= 8) result.push(["Xỉu", 72, `10 phiên: ${tai10}T-${10-tai10}X`]);
+        else if (tai10 <= 2) result.push(["Tài", 72, `10 phiên: ${tai10}T-${10-tai10}X`]);
+        else if (tai10 >= 7) result.push(["Xỉu", 64, `10 phiên: ${tai10}T-${10-tai10}X`]);
+        else if (tai10 <= 3) result.push(["Tài", 64, `10 phiên: ${tai10}T-${10-tai10}X`]);
+    }
+    
+    // Khung 20 phiên
+    if (res.length >= 20) {
+        const last20 = res.slice(0, 20);
+        const tai20 = last20.filter(k => k === "Tài").length;
+        if (tai20 >= 15) result.push(["Xỉu", 76, `20 phiên: ${tai20}T-${20-tai20}X`]);
+        else if (tai20 <= 5) result.push(["Tài", 76, `20 phiên: ${tai20}T-${20-tai20}X`]);
+        else if (tai20 >= 13) result.push(["Xỉu", 68, `20 phiên: ${tai20}T-${20-tai20}X`]);
+        else if (tai20 <= 7) result.push(["Tài", 68, `20 phiên: ${tai20}T-${20-tai20}X`]);
+    }
+    
+    // Khung 30 phiên
+    if (res.length >= 30) {
+        const last30 = res.slice(0, 30);
+        const tai30 = last30.filter(k => k === "Tài").length;
+        if (tai30 >= 22) result.push(["Xỉu", 80, `30 phiên: ${tai30}T-${30-tai30}X`]);
+        else if (tai30 <= 8) result.push(["Tài", 80, `30 phiên: ${tai30}T-${30-tai30}X`]);
+    }
+    
+    return result;
+}
+
+// 3.2 PHÂN TÍCH LỆCH PHA
+function phanTichLechPha(res) {
+    const result = [];
+    
+    for (let khung of [10, 15, 20]) {
+        if (res.length >= khung) {
+            const last = res.slice(0, khung);
+            const tai = last.filter(k => k === "Tài").length;
+            const xiu = khung - tai;
+            const chenh = Math.abs(tai - xiu);
+            
+            if (chenh >= 6) {
+                const duDoan = tai > xiu ? "Xỉu" : "Tài";
+                let doTin = 70 + Math.min(15, chenh);
+                result.push([duDoan, doTin, `Lệch ${khung}p: ${tai}T-${xiu}X (chênh ${chenh})`]);
+            }
+        }
+    }
+    
+    return result;
+}
+
+// 3.3 PHÂN TÍCH XU HƯỚNG
+function phanTichXuHuong(res) {
+    const result = [];
+    
+    // Khung 5 phiên
+    if (res.length >= 5) {
+        const last5 = res.slice(0, 5);
+        const tai5 = last5.filter(k => k === "Tài").length;
+        if (tai5 >= 4) result.push(["Xỉu", 66, `5 phiên: ${tai5}T-${5-tai5}X, nghiêng Tài`]);
+        else if (tai5 <= 1) result.push(["Tài", 66, `5 phiên: ${tai5}T-${5-tai5}X, nghiêng Xỉu`]);
+        else if (tai5 >= 3) result.push(["Tài", 58, `5 phiên: ${tai5}T-${5-tai5}X, nhẹ Tài`]);
+        else result.push(["Xỉu", 58, `5 phiên: ${tai5}T-${5-tai5}X, nhẹ Xỉu`]);
+    }
+    
+    // Khung 7 phiên
+    if (res.length >= 7) {
+        const last7 = res.slice(0, 7);
+        const tai7 = last7.filter(k => k === "Tài").length;
+        if (tai7 >= 5) result.push(["Xỉu", 64, `7 phiên: ${tai7}T-${7-tai7}X`]);
+        else if (tai7 <= 2) result.push(["Tài", 64, `7 phiên: ${tai7}T-${7-tai7}X`]);
+    }
+    
+    return result;
+}
+
+// ============================================================
+// ========== PHẦN 4: PATTERN MATCHING (HỌC TỪ LỊCH SỬ) ==========
+// ============================================================
+
+function patternMatching(res, doDai, trongSo) {
+    if (res.length < doDai + 1) return null;
+    
+    const pattern = res.slice(0, doDai);
+    const patternStr = pattern.map(r => r === "Tài" ? "T" : "X").join('');
+    let count = 0, nextTai = 0, nextXiu = 0;
+    
+    for (let i = 0; i <= res.length - doDai - 1; i++) {
+        const match = res.slice(i, i + doDai).every((v, idx) => v === pattern[idx]);
+        if (match) {
+            count++;
+            if (res[i + doDai] === "Tài") nextTai++;
+            else nextXiu++;
+        }
+    }
+    
+    if (count >= 2) {
+        const total = nextTai + nextXiu;
+        const tyLeTai = (nextTai / total) * 100;
+        if (tyLeTai >= 65) return { duDoan: "Tài", doTinCay: 60 + Math.min(20, tyLeTai - 60), soLan: count };
+        if (tyLeTai <= 35) return { duDoan: "Xỉu", doTinCay: 60 + Math.min(20, 60 - tyLeTai), soLan: count };
     }
     
     return null;
 }
 
-// 9. PHÂN TÍCH LỆCH PHA
-function phanTichLechPha(lichSuKQ, khung = 15) {
-    if (lichSuKQ.length < khung) return null;
+// ============================================================
+// ========== PHẦN 5: THUẬT TOÁN RIÊNG CHO SUNWIN ==========
+// ============================================================
+
+function predictSunwin(lichSu) {
+    const res = lichSu.map(h => h.Ket_qua);
+    if (res.length < 5) return { duDoan: "Tài", doTinCay: 55, cauType: "chưa_đủ_dữ_liệu" };
     
-    const ganDay = lichSuKQ.slice(0, khung);
-    const tai = ganDay.filter(k => k === "TAI").length;
-    const xiu = khung - tai;
-    const chenhLech = Math.abs(tai - xiu);
+    const votes = [];
+    const phatHien = [];
     
-    if (chenhLech < 4) return null;
-    
-    let doTinCay = 0;
-    let khuyenNghi = "";
-    
-    if (chenhLech >= 8) {
-        doTinCay = 85;
-        khuyenNghi = "LỆCH CỰC ĐẠI - BẮT CỬA THIẾU";
-    } else if (chenhLech >= 6) {
-        doTinCay = 78;
-        khuyenNghi = "LỆCH LỚN - BẮT CỬA THIẾU";
-    } else {
-        doTinCay = 68;
-        khuyenNghi = "LỆCH VỪA - CÓ THỂ BẮT CỬA THIẾU";
+    // 1. PHÁT HIỆN CẦU (9 loại)
+    const bet = phatHienBet(res);
+    if (bet.coCau) {
+        votes.push([bet.duDoan, bet.doTinCay * 1.0]);
+        phatHien.push(bet);
     }
     
-    const duDoan = tai > xiu ? "XỈU" : "TÀI";
+    const cau11 = phatHienCau11(res);
+    if (cau11.coCau) {
+        votes.push([cau11.duDoan, cau11.doTinCay * 0.95]);
+        phatHien.push(cau11);
+    }
+    
+    const cau22 = phatHienCau22(res);
+    if (cau22.coCau) {
+        votes.push([cau22.duDoan, cau22.doTinCay * 0.95]);
+        phatHien.push(cau22);
+    }
+    
+    const cau32 = phatHienCau32(res);
+    if (cau32.coCau) {
+        votes.push([cau32.duDoan, cau32.doTinCay * 0.9]);
+        phatHien.push(cau32);
+    }
+    
+    const cau33 = phatHienCau33(res);
+    if (cau33.coCau) {
+        votes.push([cau33.duDoan, cau33.doTinCay * 0.9]);
+        phatHien.push(cau33);
+    }
+    
+    const cau121 = phatHienCau121(res);
+    if (cau121.coCau) {
+        votes.push([cau121.duDoan, cau121.doTinCay * 0.85]);
+        phatHien.push(cau121);
+    }
+    
+    const cau212 = phatHienCau212(res);
+    if (cau212.coCau) {
+        votes.push([cau212.duDoan, cau212.doTinCay * 0.85]);
+        phatHien.push(cau212);
+    }
+    
+    const chuKy = phatHienChuKy(res);
+    if (chuKy.coCau) {
+        votes.push([chuKy.duDoan, chuKy.doTinCay * 0.85]);
+        phatHien.push(chuKy);
+    }
+    
+    // 2. THỐNG KÊ
+    const tanSuat = phanTichTanSuat(res);
+    for (const [duDoan, doTin, lyDo] of tanSuat) {
+        votes.push([duDoan, doTin * 0.7]);
+    }
+    
+    const lechPha = phanTichLechPha(res);
+    for (const [duDoan, doTin, lyDo] of lechPha) {
+        votes.push([duDoan, doTin * 0.75]);
+    }
+    
+    const xuHuong = phanTichXuHuong(res);
+    for (const [duDoan, doTin, lyDo] of xuHuong) {
+        votes.push([duDoan, doTin * 0.65]);
+    }
+    
+    // 3. PATTERN MATCHING
+    const p3 = patternMatching(res, 3, 0.7);
+    if (p3) votes.push([p3.duDoan, p3.doTinCay * 0.7]);
+    
+    const p4 = patternMatching(res, 4, 0.75);
+    if (p4) votes.push([p4.duDoan, p4.doTinCay * 0.75]);
+    
+    const p5 = patternMatching(res, 5, 0.8);
+    if (p5) votes.push([p5.duDoan, p5.doTinCay * 0.8]);
+    
+    // 4. TỔNG HỢP
+    const result = weighted_vote(votes);
+    const mainCau = phatHien.length > 0 ? phatHien[0].loaiCau : "hỗn_hợp";
     
     return {
-        coCau: true,
-        loaiCau: `LỆCH PHA ${khung}P (${tai}T-${xiu}X)`,
-        doDai: khung,
-        duDoan: duDoan,
-        doTinCay: doTinCay,
-        khuyenNghi: khuyenNghi,
-        phanTich: `${khung} phiên gần nhất: ${tai} Tài - ${xiu} Xỉu, chênh lệch ${chenhLech}`
+        duDoan: result.duDoan,
+        doTinCay: result.doTinCay,
+        cauType: mainCau,
+        soCauPhatHien: phatHien.length,
+        chiTietCau: phatHien.slice(0, 3).map(c => ({ loai: c.loaiCau, doTinCay: c.doTinCay }))
     };
 }
 
-// 10. TỔNG HỢP TẤT CẢ CÁC LOẠI CẦU
-function tongHopCau(lichSuKQ) {
-    const tatCaCau = [];
-    
-    // Thu thập tất cả các loại cầu
-    const cauBet = phatHienCauBet(lichSuKQ);
-    if (cauBet) tatCaCau.push(cauBet);
-    
-    const cau11 = phatHienCau11(lichSuKQ);
-    if (cau11) tatCaCau.push(cau11);
-    
-    const cau22 = phatHienCau22(lichSuKQ);
-    if (cau22) tatCaCau.push(cau22);
-    
-    const cau32 = phatHienCau32(lichSuKQ);
-    if (cau32) tatCaCau.push(cau32);
-    
-    const cau33 = phatHienCau33(lichSuKQ);
-    if (cau33) tatCaCau.push(cau33);
-    
-    const cau121 = phatHienCau121(lichSuKQ);
-    if (cau121) tatCaCau.push(cau121);
-    
-    const cau212 = phatHienCau212(lichSuKQ);
-    if (cau212) tatCaCau.push(cau212);
-    
-    const chuKy = phatHienChuKy(lichSuKQ);
-    if (chuKy) tatCaCau.push(chuKy);
-    
-    const lechPha = phanTichLechPha(lichSuKQ, 15);
-    if (lechPha) tatCaCau.push(lechPha);
-    
-    const lechPha10 = phanTichLechPha(lichSuKQ, 10);
-    if (lechPha10) tatCaCau.push(lechPha10);
-    
-    if (tatCaCau.length === 0) return null;
-    
-    // Sắp xếp theo độ tin cậy giảm dần
-    tatCaCau.sort((a, b) => b.doTinCay - a.doTinCay);
-    
-    return tatCaCau[0];
-}
-
-// 11. PHÂN TÍCH XÚC XẮC (BỔ SUNG)
-function phanTichXucXac(lichSu) {
-    if (!lichSu || lichSu.length < 10) return null;
-    
-    const matDem = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
-    const tongDem = [];
-    
-    for (let i = 0; i < Math.min(lichSu.length, 30); i++) {
-        if (lichSu[i]?.dices) {
-            for (let d of lichSu[i].dices) matDem[d]++;
-            const tong = lichSu[i].dices.reduce((a,b) => a+b, 0);
-            tongDem.push(tong);
-        }
-    }
-    
-    const tongTB = tongDem.length > 0 ? tongDem.reduce((a,b) => a+b, 0) / tongDem.length : 10.5;
-    const ganDay = tongDem.slice(0, 10);
-    const ganDayTB = ganDay.length > 0 ? ganDay.reduce((a,b) => a+b, 0) / ganDay.length : 10.5;
-    
-    return { tongTB, ganDayTB, xuHuong: ganDayTB > tongTB + 1 ? "TANG" : (ganDayTB < tongTB - 1 ? "GIAM" : "ON_DINH") };
-}
-
 // ============================================================
-// ========== DỰ ĐOÁN CHÍNH ==========
+// ========== PHẦN 6: THUẬT TOÁN RIÊNG CHO B52 ==========
 // ============================================================
 
-async function duDoan(game) {
-    const url = game === "TX" ? URL_TX : URL_MD5;
-    const data = await fetchData(url);
-    if (!data || !data.list || data.list.length === 0) {
-        return { error: "Không có dữ liệu" };
+function predictB52(lichSu) {
+    const res = lichSu.map(h => h.Ket_qua);
+    if (res.length < 5) return { duDoan: "Tài", doTinCay: 55, cauType: "chưa_đủ_dữ_liệu" };
+    
+    const votes = [];
+    const phatHien = [];
+    
+    // 1. PHÁT HIỆN CẦU (ưu tiên bệt và 2-2 cho B52)
+    const bet = phatHienBet(res);
+    if (bet.coCau) {
+        votes.push([bet.duDoan, bet.doTinCay * 1.05]);
+        phatHien.push(bet);
     }
     
-    const lichSu = data.list;
-    const current = lichSu[0];
-    const lichSuKQ = lichSu.map(h => h.resultTruyenThong);
-    
-    // 1. Phân tích cầu
-    const cau = tongHopCau(lichSuKQ);
-    
-    // 2. Phân tích xúc xắc
-    const xx = phanTichXucXac(lichSu);
-    
-    // 3. Quyết định dự đoán
-    let duDoanResult = null;
-    let doTinCay = 0;
-    let lyDo = "";
-    let phanTichChiTiet = [];
-    
-    if (cau) {
-        duDoanResult = cau.duDoan;
-        doTinCay = cau.doTinCay;
-        lyDo = cau.khuyenNghi;
-        phanTichChiTiet.push(`🎯 ${cau.phanTich}`);
-        phanTichChiTiet.push(`📊 Độ tin cậy: ${doTinCay}%`);
+    const cau22 = phatHienCau22(res);
+    if (cau22.coCau) {
+        votes.push([cau22.duDoan, cau22.doTinCay * 1.0]);
+        phatHien.push(cau22);
     }
     
-    // Nếu không có cầu hoặc độ tin cậy thấp, dùng xúc xắc
-    if (!duDoanResult || doTinCay < 60) {
-        if (xx) {
-            if (xx.xuHuong === "TANG" && xx.ganDayTB > 11) {
-                duDoanResult = "XỈU";
-                doTinCay = 62;
-                lyDo = "XÚC XẮC ĐANG TĂNG MẠNH";
-                phanTichChiTiet.push(`🎲 Xu hướng xúc xắc: TĂNG (${xx.ganDayTB.toFixed(1)} điểm)`);
-            } else if (xx.xuHuong === "GIAM" && xx.ganDayTB < 10) {
-                duDoanResult = "TÀI";
-                doTinCay = 62;
-                lyDo = "XÚC XẮC ĐANG GIẢM MẠNH";
-                phanTichChiTiet.push(`🎲 Xu hướng xúc xắc: GIẢM (${xx.ganDayTB.toFixed(1)} điểm)`);
-            } else {
-                duDoanResult = "TÀI";
-                doTinCay = 58;
-                lyDo = "CÂN BẰNG - THEO XU HƯỚNG CƠ BẢN";
-                phanTichChiTiet.push(`⚖️ Không có cầu rõ ràng, dự đoán mặc định`);
-            }
-        } else {
-            duDoanResult = "TÀI";
-            doTinCay = 55;
-            lyDo = "THIẾU DỮ LIỆU - DỰ ĐOÁN MẶC ĐỊNH";
-        }
+    const cau11 = phatHienCau11(res);
+    if (cau11.coCau) {
+        votes.push([cau11.duDoan, cau11.doTinCay * 0.9]);
+        phatHien.push(cau11);
     }
     
-    // Xúc xắc hiện tại
-    let tong = 0, xx_hienTai = [0,0,0];
-    if (current.dices && current.dices.length === 3) {
-        xx_hienTai = current.dices;
-        tong = current.dices.reduce((a,b) => a+b, 0);
+    const cau32 = phatHienCau32(res);
+    if (cau32.coCau) {
+        votes.push([cau32.duDoan, cau32.doTinCay * 0.9]);
+        phatHien.push(cau32);
     }
     
-    const coNenCuoc = doTinCay >= 65;
+    const cau33 = phatHienCau33(res);
+    if (cau33.coCau) {
+        votes.push([cau33.duDoan, cau33.doTinCay * 0.9]);
+        phatHien.push(cau33);
+    }
     
-    // Thống kê nhanh 30 phiên
-    const lichSu30 = lichSuKQ.slice(0, 30);
-    const tai30 = lichSu30.filter(k => k === "TAI").length;
-    const xiu30 = 30 - tai30;
+    const chuKy = phatHienChuKy(res);
+    if (chuKy.coCau) {
+        votes.push([chuKy.duDoan, chuKy.doTinCay * 0.85]);
+        phatHien.push(chuKy);
+    }
+    
+    // 2. THỐNG KÊ (khung lớn hơn cho B52)
+    const tanSuat = phanTichTanSuat(res);
+    for (const [duDoan, doTin, lyDo] of tanSuat) {
+        votes.push([duDoan, doTin * 0.75]);
+    }
+    
+    const lechPha = phanTichLechPha(res);
+    for (const [duDoan, doTin, lyDo] of lechPha) {
+        votes.push([duDoan, doTin * 0.8]);
+    }
+    
+    const xuHuong = phanTichXuHuong(res);
+    for (const [duDoan, doTin, lyDo] of xuHuong) {
+        votes.push([duDoan, doTin * 0.7]);
+    }
+    
+    // 3. PATTERN MATCHING (ưu tiên pattern dài hơn)
+    const p4 = patternMatching(res, 4, 0.7);
+    if (p4) votes.push([p4.duDoan, p4.doTinCay * 0.75]);
+    
+    const p5 = patternMatching(res, 5, 0.75);
+    if (p5) votes.push([p5.duDoan, p5.doTinCay * 0.8]);
+    
+    const p6 = patternMatching(res, 6, 0.8);
+    if (p6) votes.push([p6.duDoan, p6.doTinCay * 0.85]);
+    
+    // 4. BỆT ĐẶC BIỆT CHO B52
+    const [streak, cur] = get_streak(res);
+    if (streak >= 3) {
+        const doTin = Math.min(82, 60 + streak * 4);
+        votes.push([opp(cur), doTin * 0.9]);
+    }
+    
+    const result = weighted_vote(votes);
+    const mainCau = phatHien.length > 0 ? phatHien[0].loaiCau : "hỗn_hợp";
     
     return {
-        success: true,
-        game: game,
-        current: {
-            phien: current.id,
-            xuc_xac: `${xx_hienTai[0]} - ${xx_hienTai[1]} - ${xx_hienTai[2]}`,
-            tong: tong,
-            ket_qua: current.resultTruyenThong === "TAI" ? "TÀI" : "XỈU"
-        },
-        du_doan: {
-            phien_tiep: current.id + 1,
-            du_doan: duDoanResult,
-            do_tin_cay: `${doTinCay}%`,
-            co_nen_cuoc: coNenCuoc ? "✅ NÊN CƯỢC" : "⏸️ BỎ QUA",
-            ly_do: lyDo
-        },
-        phan_tich_cau: cau ? {
-            loai_cau: cau.loaiCau,
-            do_dai: cau.doDai,
-            do_tin_cay: `${cau.doTinCay}%`,
-            mo_ta: cau.phanTich
-        } : { loai_cau: "KHÔNG CÓ CẦU RÕ RÀNG" },
-        chi_tiet_phan_tich: phanTichChiTiet,
-        thong_ke: {
-            tong_phien_phan_tich: Math.min(lichSu.length, 50),
-            ti_le_tai_30p: `${Math.round(tai30 / 30 * 100)}%`,
-            tai_30p: `${tai30}T - ${xiu30}X`
-        },
-        timestamp: new Date().toISOString()
+        duDoan: result.duDoan,
+        doTinCay: result.doTinCay,
+        cauType: mainCau,
+        soCauPhatHien: phatHien.length,
+        chiTietCau: phatHien.slice(0, 3).map(c => ({ loai: c.loaiCau, doTinCay: c.doTinCay }))
     };
 }
 
-async function fetchData(url) {
+// ============================================================
+// ========== PHẦN 7: FETCH DỮ LIỆU ==========
+// ============================================================
+
+async function fetchSunwin() {
     try {
-        const res = await http.get(url);
-        return res.data;
+        const res = await http.get(API_SUNWIN);
+        if (res.data && res.data.taixiu && Array.isArray(res.data.taixiu)) {
+            return res.data.taixiu.map(item => ({
+                Phien: item.Phien,
+                Ket_qua: item.Ket_qua === "Tài" ? "Tài" : "Xỉu",
+                Tong: item.Tong,
+                Xuc_xac_1: item.Xuc_xac_1,
+                Xuc_xac_2: item.Xuc_xac_2,
+                Xuc_xac_3: item.Xuc_xac_3
+            }));
+        }
+        return null;
     } catch (e) {
+        console.error("Fetch Sunwin lỗi:", e.message);
+        return null;
+    }
+}
+
+async function fetchB52() {
+    try {
+        const res = await http.get(API_B52);
+        if (res.data && res.data.data && Array.isArray(res.data.data)) {
+            return res.data.data.map(item => ({
+                Phien: item.Phien,
+                Ket_qua: item.Ket_qua === "Tài" ? "Tài" : "Xỉu",
+                Tong: item.Tong,
+                Xuc_xac_1: item.Xuc_xac_1,
+                Xuc_xac_2: item.Xuc_xac_2,
+                Xuc_xac_3: item.Xuc_xac_3
+            }));
+        }
+        return null;
+    } catch (e) {
+        console.error("Fetch B52 lỗi:", e.message);
         return null;
     }
 }
 
 // ============================================================
-// ========== API ==========
+// ========== PHẦN 8: HÀM BỎ PHIẾU ==========
+// ============================================================
+
+function weighted_vote(votes) {
+    let s = { Tài: 0, Xỉu: 0 };
+    for (const [pred, w] of votes) {
+        if (pred === "Tài") s.Tài += w;
+        else if (pred === "Xỉu") s.Xỉu += w;
+    }
+    const total = s.Tài + s.Xỉu;
+    if (total === 0) return { duDoan: "Tài", doTinCay: 50 };
+    const final = s.Tài >= s.Xỉu ? "Tài" : "Xỉu";
+    const conf = Math.min(96, Math.max(50, Math.floor((s[final] / total) * 100)));
+    return { duDoan: final, doTinCay: conf };
+}
+
+// ============================================================
+// ========== PHẦN 9: API ENDPOINTS ==========
 // ============================================================
 
 app.get("/", (req, res) => {
     res.json({
-        name: "🎲 LC79 - HỆ THỐNG PHÂN TÍCH CẦU TOÀN DIỆN 🎲",
+        name: "🎲 API DỰ ĐOÁN TÀI XỈU - SUNWIN & B52 🎲",
         author: "@tranhoang2286",
-        version: "13.0",
-        cac_loai_cau: [
-            "📊 Cầu bệt (3-4-5-6-7+) - Đảo cầu khi bệt dài",
-            "📊 Cầu 1-1 (đan xen Tài-Xỉu)",
-            "📊 Cầu 2-2 (cặp đôi TT-XX)",
-            "📊 Cầu 3-2 (3T-2X / 3X-2T)",
-            "📊 Cầu 3-3 (3T-3X / 3X-3T)",
-            "📊 Cầu 1-2-1 (T-X-X-T / X-T-T-X)",
-            "📊 Cầu 2-1-2 (TT-X-TT / XX-T-XX)",
-            "📊 Chu kỳ lặp lại",
-            "📊 Lệch pha (10-15 phiên)",
-            "🎲 Phân tích xúc xắc"
+        version: "3.0 - SIÊU THUẬT TOÁN",
+        thuat_toan: [
+            "🔴 1. Bệt 10 cấp độ (3-10+ phiên)",
+            "🟢 2. Cầu 1-1 (đan xen Tài-Xỉu)",
+            "🟢 3. Cầu 2-2 (cặp đôi TT-XX)",
+            "🔵 4. Cầu 3-2 (3T-2X / 3X-2T)",
+            "🔵 5. Cầu 3-3 (3T-3X / 3X-3T)",
+            "🟣 6. Cầu 1-2-1 (T-X-X-T)",
+            "🟣 7. Cầu 2-1-2 (TT-X-TT)",
+            "🔄 8. Chu kỳ lặp lại (2-7 phiên)",
+            "📊 9. Tần suất (10-20-30 phiên)",
+            "📈 10. Xu hướng (5-7 phiên)",
+            "📐 11. Lệch pha (10-15-20 phiên)",
+            "📚 12. Pattern matching (3-4-5-6 phiên)"
         ],
-        quy_tac: "✅ CHỈ CƯỢC KHI 'co_nen_cuoc' = '✅ NÊN CƯỢC' (độ tin cậy >= 65%)",
         endpoints: {
-            "TX (Hũ)": "GET /taixiu",
-            "MD5": "GET /taixiumd5"
+            "Sunwin - Dự đoán": "GET /api/sunwin/predict",
+            "B52 - Dự đoán": "GET /api/b52/predict",
+            "Sunwin - Lịch sử": "GET /api/sunwin/history",
+            "B52 - Lịch sử": "GET /api/b52/history"
         }
     });
 });
 
-app.get("/taixiu", async (req, res) => {
+app.get("/api/sunwin/predict", async (req, res) => {
     try {
-        const r = await duDoan("TX");
-        res.json(r);
+        const lichSu = await fetchSunwin();
+        if (!lichSu || lichSu.length === 0) {
+            return res.status(500).json({ error: "Không lấy được dữ liệu Sunwin" });
+        }
+        
+        const current = lichSu[0];
+        const prediction = predictSunwin(lichSu);
+        const coNenCuoc = prediction.doTinCay >= 68;
+        
+        const last10 = lichSu.slice(0, 10).map(h => h.Ket_qua === "Tài" ? "T" : "X").join(' - ');
+        const [streak, cur] = get_streak(lichSu.map(h => h.Ket_qua));
+        
+        res.json({
+            success: true,
+            game: "SUNWIN",
+            current: {
+                phien: current.Phien,
+                xuc_xac: `${current.Xuc_xac_1} - ${current.Xuc_xac_2} - ${current.Xuc_xac_3}`,
+                tong: current.Tong,
+                ket_qua: current.Ket_qua
+            },
+            phan_tich: {
+                chuoi_bet_hien_tai: streak >= 2 ? `${streak} phiên ${cur}` : "không có bệt",
+                so_cau_phat_hien: prediction.soCauPhatHien
+            },
+            du_doan: {
+                phien_tiep: current.Phien + 1,
+                du_doan: prediction.duDoan,
+                do_tin_cay: `${prediction.doTinCay}%`,
+                co_nen_cuoc: coNenCuoc ? "✅✅✅ NÊN CƯỢC MẠNH" : (prediction.doTinCay >= 60 ? "⚠️ CƯỢC NHẸ" : "⏸️ BỎ QUA"),
+                loai_cau_chinh: prediction.cauType,
+                chi_tiet_cau: prediction.chiTietCau
+            },
+            lich_su_gan_day: last10,
+            timestamp: new Date().toISOString()
+        });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-app.get("/taixiumd5", async (req, res) => {
+app.get("/api/b52/predict", async (req, res) => {
     try {
-        const r = await duDoan("MD5");
-        res.json(r);
+        const lichSu = await fetchB52();
+        if (!lichSu || lichSu.length === 0) {
+            return res.status(500).json({ error: "Không lấy được dữ liệu B52" });
+        }
+        
+        const current = lichSu[0];
+        const prediction = predictB52(lichSu);
+        const coNenCuoc = prediction.doTinCay >= 68;
+        
+        const last10 = lichSu.slice(0, 10).map(h => h.Ket_qua === "Tài" ? "T" : "X").join(' - ');
+        const [streak, cur] = get_streak(lichSu.map(h => h.Ket_qua));
+        
+        res.json({
+            success: true,
+            game: "B52",
+            current: {
+                phien: current.Phien,
+                xuc_xac: `${current.Xuc_xac_1} - ${current.Xuc_xac_2} - ${current.Xuc_xac_3}`,
+                tong: current.Tong,
+                ket_qua: current.Ket_qua
+            },
+            phan_tich: {
+                chuoi_bet_hien_tai: streak >= 2 ? `${streak} phiên ${cur}` : "không có bệt",
+                so_cau_phat_hien: prediction.soCauPhatHien
+            },
+            du_doan: {
+                phien_tiep: current.Phien + 1,
+                du_doan: prediction.duDoan,
+                do_tin_cay: `${prediction.doTinCay}%`,
+                co_nen_cuoc: coNenCuoc ? "✅✅✅ NÊN CƯỢC MẠNH" : (prediction.doTinCay >= 60 ? "⚠️ CƯỢC NHẸ" : "⏸️ BỎ QUA"),
+                loai_cau_chinh: prediction.cauType,
+                chi_tiet_cau: prediction.chiTietCau
+            },
+            lich_su_gan_day: last10,
+            timestamp: new Date().toISOString()
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get("/api/sunwin/history", async (req, res) => {
+    try {
+        const data = await fetchSunwin();
+        res.json({ success: true, game: "SUNWIN", history: data });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get("/api/b52/history", async (req, res) => {
+    try {
+        const data = await fetchB52();
+        res.json({ success: true, game: "B52", history: data });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`\n================================================================`);
-    console.log(`🎲 LC79 - HỆ THỐNG PHÂN TÍCH CẦU TOÀN DIỆN v13.0`);
-    console.log(`================================================================`);
-    console.log(`✅ TX: http://localhost:${PORT}/taixiu`);
-    console.log(`✅ MD5: http://localhost:${PORT}/taixiumd5`);
-    console.log(`🎯 10+ LOẠI CẦU ĐƯỢC PHÂN TÍCH`);
-    console.log(`🎯 CHỈ CƯỢC KHI "co_nen_cuoc" = "✅ NÊN CƯỢC"`);
-    console.log(`================================================================\n`);
+    console.log(`\n============================================================`);
+    console.log(`🎲 API DỰ ĐOÁN SUNWIN & B52 - SIÊU THUẬT TOÁN`);
+    console.log(`============================================================`);
+    console.log(`✅ Sunwin: http://localhost:${PORT}/api/sunwin/predict`);
+    console.log(`✅ B52: http://localhost:${PORT}/api/b52/predict`);
+    console.log(`🎯 12+ THUẬT TOÁN - PHÂN TÍCH ĐA CHIỀU`);
+    console.log(`🎯 MỖI GAME CÓ THUẬT TOÁN RIÊNG`);
+    console.log(`============================================================\n`);
 });
